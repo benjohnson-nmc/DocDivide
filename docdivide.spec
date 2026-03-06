@@ -13,6 +13,9 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_all
+
+crypto_datas, crypto_binaries, crypto_hiddenimports = collect_all('cryptography')
 
 # -- CONFIGURE THIS --
 POPPLER_BIN = r"C:\Users\bjohnson\AppData\Local\Microsoft\WinGet\Packages\oschwartz10612.Poppler_Microsoft.Winget.Source_8wekyb3d8bbwe\poppler-25.07.0\Library\bin"
@@ -34,8 +37,8 @@ poppler_bins += [(str(f), "poppler") for f in Path(POPPLER_BIN).glob("*.exe")]
 a = Analysis(
     ["docdivide.py"],
     pathex=[],
-    binaries=poppler_bins,
-    datas=[],
+    binaries=poppler_bins + crypto_binaries,
+    datas=crypto_datas,
     hiddenimports=[
         "anthropic",
         "pypdf",
@@ -50,22 +53,8 @@ a = Analysis(
         "tkinter.messagebox",
         "oracledb",
         "tkinterdnd2",
-        "cryptography",
-        "cryptography.x509",
-        "cryptography.hazmat",
-        "cryptography.hazmat.primitives",
-        "cryptography.hazmat.primitives.ciphers",
-        "cryptography.hazmat.primitives.ciphers.algorithms",
-        "cryptography.hazmat.primitives.ciphers.modes",
-        "cryptography.hazmat.primitives.hashes",
-        "cryptography.hazmat.primitives.hmac",
-        "cryptography.hazmat.primitives.asymmetric",
-        "cryptography.hazmat.primitives.asymmetric.rsa",
-        "cryptography.hazmat.primitives.asymmetric.padding",
-        "cryptography.hazmat.primitives.serialization",
-        "cryptography.hazmat.backends",
-        "cryptography.hazmat.backends.openssl",
         "cffi",
+        *crypto_hiddenimports,
     ],
     hookspath=[],
     runtime_hooks=[str(hook_path)],
