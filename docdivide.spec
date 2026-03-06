@@ -38,7 +38,7 @@ a = Analysis(
     ["docdivide.py"],
     pathex=[],
     binaries=poppler_bins + crypto_binaries,
-    datas=crypto_datas,
+    datas=crypto_datas + [("northern_logo.png", ".")],
     hiddenimports=[
         "anthropic",
         "pypdf",

@@ -44,7 +44,7 @@ try:
 except ImportError:
     missing.append("pdf2image")
 try:
-    from PIL import Image
+    from PIL import Image, ImageTk
 except ImportError:
     missing.append("pillow")
 
@@ -53,12 +53,6 @@ if missing:
     print(f"Run: pip install {' '.join(missing)}")
     sys.exit(1)
 
-try:
-    import ttkbootstrap as ttk_bs
-    from ttkbootstrap.constants import *
-    USE_BOOTSTRAP = True
-except ImportError:
-    USE_BOOTSTRAP = False
 
 try:
     from tkinterdnd2 import TkinterDnD, DND_FILES
@@ -69,6 +63,16 @@ except ImportError:
 import csv
 import re
 import zipfile
+
+
+def resource_path(relative_path: str) -> str:
+    """Resolve path to a bundled resource (works from source and PyInstaller exe)."""
+    try:
+        base = sys._MEIPASS
+    except AttributeError:
+        base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, relative_path)
+
 
 # -- Embedded API key (obfuscated with XOR) --
 # Run embed_key.py to regenerate these values for your key.
@@ -90,18 +94,62 @@ ERP_SERVICE = "LIVE1"
 ERP_USER = "PK1"
 ERP_PWD = "PK1"
 
+# ── Night-mode palette ──────────────────────────────────────────
+BG_MAIN    = "#0d1117"
+BG_SURFACE = "#161b22"
+BG_HEADER  = "#0d1b2a"
+FG_PRIMARY = "#e6edf3"
+FG_DIM     = "#8b949e"
+ACCENT     = "#1d4ed8"
+BTN_CANCEL = "#b91c1c"
+BTN_OK     = "#15803d"
+BTN_GRAY   = "#374151"
+BORDER     = "#30363d"
+TREE_SEL   = "#1e3a5f"
+
 # -- Helpers --
 
-def page_to_base64(pdf_path: str, page_idx: int) -> str:
-    images = convert_from_path(pdf_path, first_page=page_idx + 1, last_page=page_idx + 1, dpi=150)
-    img = images[0]
+def render_page(pdf_path: str, page_idx: int, dpi: int = 150) -> "Image.Image":
+    images = convert_from_path(pdf_path, first_page=page_idx + 1, last_page=page_idx + 1, dpi=dpi)
+    return images[0]
+
+
+def crop_title_block(img: "Image.Image") -> str:
+    """Crop bottom-right 65%×40% of image and return as base64 JPEG."""
     w, h = img.size
-    tb_w = int(w * 0.60)
-    tb_h = int(h * 0.32)
-    crop = img.crop((w - tb_w, h - tb_h, w, h))
+    crop = img.crop((int(w * 0.35), int(h * 0.60), w, h))
     buf = BytesIO()
     crop.save(buf, format="JPEG", quality=88)
     return base64.b64encode(buf.getvalue()).decode()
+
+
+def img_to_b64(img: "Image.Image") -> str:
+    """Encode a PIL image as base64 JPEG."""
+    buf = BytesIO()
+    img.save(buf, format="JPEG", quality=72)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def detect_orientation(client, full_page_b64: str) -> int:
+    """Ask Claude what clockwise rotation (0/90/180/270) corrects this page orientation."""
+    msg = client.messages.create(
+        model=MODEL,
+        max_tokens=16,
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": full_page_b64}},
+                {"type": "text", "text":
+                    "This is an engineering drawing. What clockwise rotation in degrees "
+                    "(0, 90, 180, or 270) must be applied so the drawing is landscape with "
+                    "the title block in the bottom-right corner? Reply with ONLY the number."}
+            ]
+        }]
+    )
+    try:
+        return int(msg.content[0].text.strip())
+    except Exception:
+        return 0
 
 
 def extract_title_block(client, b64_img: str, page_num: int) -> dict:
@@ -183,8 +231,8 @@ def deduplicate_pages(pages):
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("DocDivide -- Engineering Drawing PDF Splitter")
-        self.root.geometry("1000x720")
+        self.root.title("DocDivide")
+        self.root.geometry("1200x720")
         self.root.resizable(True, True)
 
         self.pdf_paths = []
@@ -195,90 +243,174 @@ class App:
         self._build_ui()
 
     def _build_ui(self):
+        # Apply dark theme to ttk widgets BEFORE creating any widgets
+        style = ttk.Style()
+        style.theme_use("default")
+        style.configure("Treeview",
+            background=BG_SURFACE, foreground=FG_PRIMARY,
+            fieldbackground=BG_SURFACE, rowheight=24,
+            font=("Segoe UI", 9))
+        style.configure("Treeview.Heading",
+            background=BG_HEADER, foreground=FG_PRIMARY,
+            font=("Segoe UI", 9, "bold"), relief="flat")
+        style.map("Treeview", background=[("selected", TREE_SEL)])
+
+        self.root.configure(bg=BG_MAIN)
         pad = {"padx": 10, "pady": 6}
 
-        top = tk.Frame(self.root, bg="#1e3a5f", height=56)
+        # ── Header ────────────────────────────────────────────────────
+        top = tk.Frame(self.root, bg=BG_HEADER, height=64)
         top.pack(fill=tk.X)
-        tk.Label(top, text="DocDivide  --  Engineering Drawing PDF Splitter",
-                 bg="#1e3a5f", fg="white", font=("Segoe UI", 14, "bold")).pack(side=tk.LEFT, padx=16, pady=12)
+        top.pack_propagate(False)
 
-        main = tk.Frame(self.root, bg="#f0f4f8")
+        # Logo (optional — loads from northern_logo.png if present)
+        try:
+            _img = Image.open(resource_path("northern_logo.png")).convert("RGBA")
+            # Replace near-white pixels with header bg color so logo blends in
+            hx = BG_HEADER.lstrip("#")
+            hc = (int(hx[0:2], 16), int(hx[2:4], 16), int(hx[4:6], 16), 255)
+            pixels = _img.load()
+            for y in range(_img.height):
+                for x in range(_img.width):
+                    r, g, b, a = pixels[x, y]
+                    if r > 220 and g > 220 and b > 220:
+                        pixels[x, y] = hc
+            orig_w, orig_h = _img.size
+            target_h = 52
+            target_w = int(orig_w * target_h / orig_h)
+            _img = _img.resize((target_w, target_h), Image.LANCZOS).convert("RGB")
+            self._logo_photo = ImageTk.PhotoImage(_img)
+            tk.Label(top, image=self._logo_photo, bg=BG_HEADER, bd=0).pack(
+                side=tk.LEFT, padx=16, pady=6)
+        except Exception:
+            pass
+
+        tk.Label(top, text="DocDivide", bg=BG_HEADER, fg=FG_PRIMARY,
+                 font=("Segoe UI", 16, "bold")).pack(side=tk.LEFT, pady=6)
+
+        # ── Main area ─────────────────────────────────────────────────
+        main = tk.Frame(self.root, bg=BG_MAIN)
         main.pack(fill=tk.BOTH, expand=True, padx=14, pady=10)
 
-        row1 = tk.LabelFrame(main, text="Setup", bg="#f0f4f8", font=("Segoe UI", 10, "bold"))
+        # ── Setup frame ───────────────────────────────────────────────
+        row1 = tk.LabelFrame(main, text="Setup", bg=BG_SURFACE, fg=FG_PRIMARY,
+                              font=("Segoe UI", 10, "bold"))
         row1.pack(fill=tk.X, pady=(0, 8))
 
-        tk.Label(row1, text="PDF File(s):", bg="#f0f4f8").grid(row=0, column=0, sticky="w", **pad)
+        tk.Label(row1, text="PDF File(s):", bg=BG_SURFACE, fg=FG_PRIMARY).grid(row=0, column=0, sticky="w", **pad)
         self.file_var = tk.StringVar(value="No file selected")
-        tk.Label(row1, textvariable=self.file_var, bg="#f0f4f8", fg="#334155", width=50, anchor="w").grid(row=0, column=1, sticky="w", **pad)
-        tk.Button(row1, text="Browse...", command=self._browse_files, bg="#e2e8f0").grid(row=0, column=2, **pad)
+        tk.Label(row1, textvariable=self.file_var, bg=BG_SURFACE, fg=FG_PRIMARY,
+                 width=50, anchor="w").grid(row=0, column=1, sticky="w", **pad)
+        tk.Button(row1, text="Browse...", command=self._browse_files,
+                  bg=BTN_GRAY, fg="white", relief=tk.FLAT,
+                  padx=8, pady=4, cursor="hand2").grid(row=0, column=2, **pad)
 
-        row2 = tk.Frame(main, bg="#f0f4f8")
+        # Drag-and-drop zone
+        dnd_row = 1
+        if USE_DND:
+            drop_zone = tk.Label(row1, text="  \u2193  Drop PDF(s) here  \u2193  ",
+                                 bg="#1e293b", fg=FG_DIM, relief="groove",
+                                 cursor="hand2", font=("Segoe UI", 9), pady=7)
+            drop_zone.grid(row=dnd_row, column=0, columnspan=3, sticky="ew", padx=10, pady=(0, 4))
+            drop_zone.drop_target_register(DND_FILES)
+            drop_zone.dnd_bind("<<Drop>>", self._on_drop)
+            dnd_row += 1
+
+        self.auto_rotate_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(row1, text="Auto-rotate pages  (corrects sideways drawings — adds ~50% scan cost)",
+                       variable=self.auto_rotate_var,
+                       bg=BG_SURFACE, fg=FG_PRIMARY, selectcolor=BG_SURFACE,
+                       activebackground=BG_SURFACE, activeforeground=FG_PRIMARY,
+                       font=("Segoe UI", 9)).grid(row=dnd_row, column=0, columnspan=3,
+                                                   sticky="w", padx=10, pady=(0, 6))
+
+        # ── Controls ──────────────────────────────────────────────────
+        row2 = tk.Frame(main, bg=BG_MAIN)
         row2.pack(fill=tk.X, pady=(0, 8))
 
         self.scan_btn = tk.Button(row2, text="Start Scanning", command=self._start_scan,
-                                   bg="#1e3a5f", fg="white", font=("Segoe UI", 11, "bold"),
+                                   bg=ACCENT, fg="white",
+                                   font=("Segoe UI", 11, "bold"),
                                    padx=14, pady=6, relief=tk.FLAT, cursor="hand2")
         self.scan_btn.pack(side=tk.LEFT, padx=(0, 10))
 
         self.cancel_btn = tk.Button(row2, text="Cancel", command=self._cancel,
-                                     bg="#dc2626", fg="white", padx=10, pady=6, relief=tk.FLAT,
-                                     cursor="hand2", state=tk.DISABLED)
+                                     bg=BTN_CANCEL, fg="white",
+                                     padx=10, pady=6, relief=tk.FLAT, cursor="hand2")
+        # cancel starts hidden; shown only during scanning
         self.cancel_btn.pack(side=tk.LEFT)
+        self.cancel_btn.pack_forget()
 
         self.status_var = tk.StringVar(value="Upload a PDF to begin.")
-        tk.Label(row2, textvariable=self.status_var, bg="#f0f4f8", fg="#475569",
-                 wraplength=600, justify=tk.LEFT).pack(side=tk.LEFT, padx=14)
+        self._status_lbl = tk.Label(row2, textvariable=self.status_var, bg=BG_MAIN, fg="white",
+                                    wraplength=600, justify=tk.LEFT)
+        self._status_lbl.pack(side=tk.LEFT, padx=14)
 
         self.progress = ttk.Progressbar(main, mode="determinate", length=200)
         self.progress.pack(fill=tk.X, pady=(0, 6))
 
+        # ── Drawing index table ───────────────────────────────────────
         table_frame = tk.LabelFrame(main, text="Drawing Index  (double-click a cell to edit)",
-                                    bg="#f0f4f8", font=("Segoe UI", 10, "bold"))
+                                    bg=BG_SURFACE, fg=FG_PRIMARY, font=("Segoe UI", 10, "bold"))
         table_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
 
-        cols = ("#", "Drawing Number", "Revision", "Description", "Sheets", "PDF Pages", "Flags", "ERP Rev", "ERP Status")
+        cols = ("Customer", "Drawing Number", "ERP Status", "Revision", "ERP Rev", "Description", "Sheets", "PDF Pages", "Flags")
         self.tree = ttk.Treeview(table_frame, columns=cols, show="headings", height=14)
-        widths = [36, 140, 70, 300, 56, 120, 80, 70, 90]
+        widths = [160, 140, 90, 70, 70, 300, 56, 120, 80]
         for col, w in zip(cols, widths):
             self.tree.heading(col, text=col)
             self.tree.column(col, width=w, minwidth=w)
+
         vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.tree.tag_configure("suspect", background="#fef9c3")
-        self.tree.tag_configure("normal", background="white")
-        self.tree.tag_configure("erp_match", background="#dcfce7")
-        self.tree.tag_configure("erp_mismatch", background="#fef9c3")
-        self.tree.tag_configure("erp_missing", background="#fee2e2")
+
+        self.tree.tag_configure("suspect",      background="#78350f", foreground=FG_PRIMARY)
+        self.tree.tag_configure("normal",       background=BG_SURFACE, foreground=FG_PRIMARY)
+        self.tree.tag_configure("erp_match",    background="#14532d", foreground=FG_PRIMARY)
+        self.tree.tag_configure("erp_mismatch", background="#713f12", foreground=FG_PRIMARY)
+        self.tree.tag_configure("erp_missing",  background="#7f1d1d", foreground=FG_PRIMARY)
         self.tree.bind("<Double-1>", self._on_double_click)
 
-        if USE_DND:
-            self.tree.drop_target_register(DND_FILES)
-            self.tree.dnd_bind("<<Drop>>", self._on_drop)
-
-        row4 = tk.Frame(main, bg="#f0f4f8")
+        # ── Action buttons ────────────────────────────────────────────
+        row4 = tk.Frame(main, bg=BG_MAIN)
         row4.pack(fill=tk.X)
 
         self.split_btn = tk.Button(row4, text="Split & Save ZIP", command=self._split_and_save,
-                                    bg="#16a34a", fg="white", font=("Segoe UI", 11, "bold"),
-                                    padx=14, pady=6, relief=tk.FLAT, cursor="hand2", state=tk.DISABLED)
+                                    bg=BTN_OK, fg="white",
+                                    font=("Segoe UI", 11, "bold"),
+                                    padx=14, pady=6, relief=tk.FLAT, cursor="hand2")
+        # split/csv start hidden; shown after a scan completes
         self.split_btn.pack(side=tk.LEFT, padx=(0, 10))
+        self.split_btn.pack_forget()
 
         self.csv_btn = tk.Button(row4, text="Export CSV Only", command=self._export_csv,
-                                  bg="#475569", fg="white", padx=10, pady=6, relief=tk.FLAT,
-                                  cursor="hand2", state=tk.DISABLED)
+                                  bg=BTN_GRAY, fg="white",
+                                  padx=10, pady=6, relief=tk.FLAT, cursor="hand2")
         self.csv_btn.pack(side=tk.LEFT, padx=(0, 10))
+        self.csv_btn.pack_forget()
 
-        tk.Button(row4, text="Merge Selected Up", command=self._merge_up,
-                  bg="#e0f2fe", relief=tk.FLAT, padx=8, pady=6).pack(side=tk.LEFT, padx=(0, 6))
-        tk.Button(row4, text="Split Selected", command=self._split_selected,
-                  bg="#fce7f3", relief=tk.FLAT, padx=8, pady=6).pack(side=tk.LEFT)
+        self._merge_btn = tk.Button(row4, text="Merge Selected Up", command=self._merge_up,
+                  bg=BTN_GRAY, fg="white", relief=tk.FLAT,
+                  padx=8, pady=6, cursor="hand2")
+        self._split_sel_btn = tk.Button(row4, text="Split Selected", command=self._split_selected,
+                  bg=BTN_GRAY, fg="white", relief=tk.FLAT,
+                  padx=8, pady=6, cursor="hand2")
+        # both start hidden; appear only when a row is selected
+        self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
 
         self.removed_var = tk.StringVar(value="")
-        tk.Label(row4, textvariable=self.removed_var, bg="#f0f4f8",
-                 fg="#7e22ce", font=("Segoe UI", 9)).pack(side=tk.RIGHT, padx=10)
+        tk.Label(row4, textvariable=self.removed_var, bg=BG_MAIN,
+                 fg="#a78bfa", font=("Segoe UI", 9)).pack(side=tk.RIGHT, padx=10)
+
+    def _on_tree_select(self, event=None):
+        if self.tree.selection():
+            self._merge_btn.pack(side=tk.LEFT, padx=(0, 6))
+            self._split_sel_btn.pack(side=tk.LEFT)
+        else:
+            self._merge_btn.pack_forget()
+            self._split_sel_btn.pack_forget()
 
     def _browse_files(self):
         paths = filedialog.askopenfilenames(filetypes=[("PDF files", "*.pdf")])
@@ -289,7 +421,7 @@ class App:
             self.file_var.set(label)
 
     def _on_drop(self, event):
-        paths = [p for p in self.tk.splitlist(event.data) if p.lower().endswith(".pdf")]
+        paths = [p for p in self.root.tk.splitlist(event.data) if p.lower().endswith(".pdf")]
         if not paths:
             return
         self.pdf_paths = paths
@@ -303,9 +435,12 @@ class App:
         self.status_var.set("Cancelling...")
 
     def _set_ui_scanning(self, scanning: bool):
-        state = tk.DISABLED if scanning else tk.NORMAL
-        self.scan_btn.config(state=state)
-        self.cancel_btn.config(state=tk.NORMAL if scanning else tk.DISABLED)
+        if scanning:
+            self.scan_btn.pack_forget()
+            self.cancel_btn.pack(side=tk.LEFT, padx=(0, 10), before=self._status_lbl)
+        else:
+            self.cancel_btn.pack_forget()
+            self.scan_btn.pack(side=tk.LEFT, padx=(0, 10), before=self._status_lbl)
 
     def _start_scan(self):
         if not self.pdf_paths:
@@ -319,12 +454,13 @@ class App:
         self.drawings = []
         self.removed_log = []
         self._refresh_table()
-        self.split_btn.config(state=tk.DISABLED)
-        self.csv_btn.config(state=tk.DISABLED)
+        self.split_btn.pack_forget()
+        self.csv_btn.pack_forget()
         self._set_ui_scanning(True)
-        threading.Thread(target=self._scan_thread, args=(key,), daemon=True).start()
+        auto_rotate = self.auto_rotate_var.get()
+        threading.Thread(target=self._scan_thread, args=(key, auto_rotate), daemon=True).start()
 
-    def _scan_thread(self, api_key: str):
+    def _scan_thread(self, api_key: str, auto_rotate: bool = False):
         client = anthropic.Anthropic(api_key=api_key)
         try:
             readers = [PdfReader(p) for p in self.pdf_paths]
@@ -340,12 +476,20 @@ class App:
                     self._update_status(f"Scanning page {done + 1} of {total}...")
                     self._update_progress(int(done / total * 100))
                     try:
-                        b64 = page_to_base64(pdf_path, i)
+                        img = render_page(pdf_path, i)
+                        rotation = 0
+                        if auto_rotate:
+                            small = img.resize((img.width // 2, img.height // 2), Image.LANCZOS)
+                            rotation = detect_orientation(client, img_to_b64(small))
+                            if rotation:
+                                img = img.rotate(-rotation, expand=True)
+                        b64 = crop_title_block(img)
                         data = extract_title_block(client, b64, i)
-                        results.append({"page": i, "pdf_path": pdf_path, "pdf_idx": j, **data})
+                        results.append({"page": i, "pdf_path": pdf_path, "pdf_idx": j,
+                                        "rotation": rotation, **data})
                     except Exception as e:
                         results.append({"page": i, "pdf_path": pdf_path, "pdf_idx": j,
-                                        "drawing_number": None, "revision": None,
+                                        "rotation": 0, "drawing_number": None, "revision": None,
                                         "description": None, "sheet": None, "project": None})
                     done += 1
                 if self.cancel_flag.is_set():
@@ -357,10 +501,11 @@ class App:
                 if dn not in groups:
                     groups[dn] = {"drawing_number": dn, "revision": r["revision"],
                                   "description": r["description"], "project": r["project"],
-                                  "erp_rev": "", "erp_status": "", "pages": []}
+                                  "erp_rev": "", "erp_status": "", "erp_customer": "", "pages": []}
                 sc, _ = parse_sheet(r["sheet"])
                 groups[dn]["pages"].append({"page": r["page"], "pdf_path": r["pdf_path"],
-                                            "pdf_idx": r["pdf_idx"], "sheet_current": sc, "sheet": r["sheet"]})
+                                            "pdf_idx": r["pdf_idx"], "sheet_current": sc,
+                                            "sheet": r["sheet"], "rotation": r.get("rotation") or 0})
 
             for g in groups.values():
                 g["pages"].sort(key=lambda p: (p["sheet_current"] or 9999, p["page"]))
@@ -399,12 +544,13 @@ class App:
             self._update_status(f"Error: {e}")
         finally:
             self.root.after(0, lambda: self._set_ui_scanning(False))
-            self.root.after(0, lambda: self.split_btn.config(state=tk.NORMAL))
-            self.root.after(0, lambda: self.csv_btn.config(state=tk.NORMAL))
+            self.root.after(0, lambda: self.split_btn.pack(side=tk.LEFT, padx=(0, 10), before=self._merge_btn))
+            self.root.after(0, lambda: self.csv_btn.pack(side=tk.LEFT, padx=(0, 10), before=self._merge_btn))
 
     def _refresh_table(self):
         for row in self.tree.get_children():
             self.tree.delete(row)
+        self._on_tree_select()
         for i, d in enumerate(self.drawings):
             suspect = is_suspect(d["drawing_number"], d.get("description"), d.get("project"))
             if len(self.pdf_paths) > 1:
@@ -414,6 +560,7 @@ class App:
             flags = "suspect" if suspect else ""
             erp_rev = d.get("erp_rev", "")
             erp_status = d.get("erp_status", "")
+            erp_customer = d.get("erp_customer", "") if erp_status == "Match" else ""
             if suspect:
                 tag = "suspect"
             elif erp_status == "Match":
@@ -425,15 +572,15 @@ class App:
             else:
                 tag = "normal"
             self.tree.insert("", tk.END, iid=str(i), tags=(tag,), values=(
-                i + 1,
+                erp_customer,
                 d["drawing_number"] or "",
+                erp_status,
                 d["revision"] or "",
+                erp_rev,
                 d["description"] or "",
                 len(d["pages"]),
                 pages_str,
                 flags,
-                erp_rev,
-                erp_status
             ))
 
     def _on_double_click(self, event):
@@ -442,12 +589,12 @@ class App:
             return
         col = self.tree.identify_column(event.x)
         col_idx = int(col.replace("#", "")) - 1
-        if col_idx not in (1, 2, 3):
+        if col_idx not in (1, 3, 5):
             return
         iid = self.tree.identify_row(event.y)
         if not iid:
             return
-        field_map = {1: "drawing_number", 2: "revision", 3: "description"}
+        field_map = {1: "drawing_number", 3: "revision", 5: "description"}
         field = field_map[col_idx]
         current_val = self.drawings[int(iid)][field] or ""
         x, y, w, h = self.tree.bbox(iid, col)
@@ -516,7 +663,7 @@ class App:
 
     def _save_thread(self, zip_path: str):
         self._update_status("Building PDFs...")
-        self.root.after(0, lambda: self.split_btn.config(state=tk.DISABLED))
+        self.root.after(0, lambda: self.split_btn.pack_forget())
         try:
             readers = {}
 
@@ -533,6 +680,8 @@ class App:
                     writer = PdfWriter()
                     for p in d["pages"]:
                         writer.add_page(get_reader(p["pdf_path"]).pages[p["page"]])
+                        if p.get("rotation"):
+                            writer.pages[-1].rotate(p["rotation"])
                     safe_name = re.sub(r"[^\w\-\.]", "_", str(d["drawing_number"]))
                     buf = BytesIO()
                     writer.write(buf)
@@ -551,7 +700,7 @@ class App:
             self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
             self._update_status(f"Error: {e}")
         finally:
-            self.root.after(0, lambda: self.split_btn.config(state=tk.NORMAL))
+            self.root.after(0, lambda: self.split_btn.pack(side=tk.LEFT, padx=(0, 10), before=self._merge_btn))
 
     def _export_csv(self):
         if not self.drawings:
@@ -578,25 +727,34 @@ class App:
         try:
             import oracledb
             placeholders = ",".join(f":{i+1}" for i in range(len(part_numbers)))
-            sql = f"SELECT DISTINCT IM_KEY, IM_REV FROM PK1.IM WHERE IM_KEY IN ({placeholders})"
+            sql = f"SELECT DISTINCT IM_KEY, IM_REV, IM_CATALOG FROM PK1.IM WHERE IM_KEY IN ({placeholders})"
             conn = oracledb.connect(user=ERP_USER, password=ERP_PWD,
                                     dsn=f"{ERP_HOST}:{ERP_PORT}/{ERP_SERVICE}")
             cursor = conn.cursor()
             cursor.execute(sql, part_numbers)
-            erp_data = {row[0].strip(): row[1].strip() if row[1] else "" for row in cursor}
+            erp_data = {
+                row[0].strip(): (
+                    row[1].strip() if row[1] else "",
+                    row[2].strip() if row[2] else "",
+                )
+                for row in cursor
+            }
             conn.close()
             for d in self.drawings:
                 dn = d["drawing_number"]
-                erp_rev = erp_data.get(dn)
-                if erp_rev is None:
+                rec = erp_data.get(dn)
+                if rec is None:
                     d["erp_rev"] = ""
                     d["erp_status"] = "Not Found"
-                elif erp_rev.upper() == (d.get("revision") or "").strip().upper():
-                    d["erp_rev"] = erp_rev
-                    d["erp_status"] = "Match"
+                    d["erp_customer"] = ""
                 else:
+                    erp_rev, erp_catalog = rec
                     d["erp_rev"] = erp_rev
-                    d["erp_status"] = "Mismatch"
+                    d["erp_customer"] = erp_catalog
+                    if erp_rev.upper() == (d.get("revision") or "").strip().upper():
+                        d["erp_status"] = "Match"
+                    else:
+                        d["erp_status"] = "Mismatch"
             match = sum(1 for d in self.drawings if d["erp_status"] == "Match")
             mismatch = sum(1 for d in self.drawings if d["erp_status"] == "Mismatch")
             missing = sum(1 for d in self.drawings if d["erp_status"] == "Not Found")
