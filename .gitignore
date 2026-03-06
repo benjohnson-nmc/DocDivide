@@ -1,0 +1,22 @@
+# PyInstaller build output
+build/
+dist/
+
+# Inno Setup output
+Output/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+venv/
+.venv/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Compiled icon (generated from icon.svg)
+# icon.ico is kept since it's needed for builds
