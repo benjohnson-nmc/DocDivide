@@ -48,7 +48,7 @@ a = Analysis(
         "tkinter.ttk",
         "tkinter.filedialog",
         "tkinter.messagebox",
-        "pyodbc",
+        "oracledb",
         "tkinterdnd2",
     ],
     hookspath=[],

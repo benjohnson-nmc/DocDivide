@@ -84,7 +84,11 @@ def _get_embedded_key() -> str:
 
 
 MODEL = "claude-sonnet-4-20250514"
-ERP_CONN = "DSN=ProfitKey;UID=pk1;PWD=pk1"
+ERP_HOST = "PK8"
+ERP_PORT = 1521
+ERP_SERVICE = "LIVE1"
+ERP_USER = "PK1"
+ERP_PWD = "PK1"
 
 # -- Helpers --
 
@@ -572,12 +576,14 @@ class App:
         if not part_numbers:
             return ""
         try:
-            import pyodbc
-            placeholders = ",".join("?" * len(part_numbers))
+            import oracledb
+            placeholders = ",".join(f":{i+1}" for i in range(len(part_numbers)))
             sql = f"SELECT DISTINCT IM_KEY, IM_REV FROM PK1.IM WHERE IM_KEY IN ({placeholders})"
-            conn = pyodbc.connect(ERP_CONN, timeout=10)
-            cursor = conn.execute(sql, part_numbers)
-            erp_data = {row.IM_KEY.strip(): row.IM_REV.strip() if row.IM_REV else "" for row in cursor}
+            conn = oracledb.connect(user=ERP_USER, password=ERP_PWD,
+                                    dsn=f"{ERP_HOST}:{ERP_PORT}/{ERP_SERVICE}")
+            cursor = conn.cursor()
+            cursor.execute(sql, part_numbers)
+            erp_data = {row[0].strip(): row[1].strip() if row[1] else "" for row in cursor}
             conn.close()
             for d in self.drawings:
                 dn = d["drawing_number"]
