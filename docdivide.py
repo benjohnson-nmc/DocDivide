@@ -60,6 +60,12 @@ try:
 except ImportError:
     USE_BOOTSTRAP = False
 
+try:
+    from tkinterdnd2 import TkinterDnD, DND_FILES
+    USE_DND = True
+except ImportError:
+    USE_DND = False
+
 import csv
 import re
 import zipfile
@@ -244,6 +250,10 @@ class App:
         self.tree.tag_configure("erp_missing", background="#fee2e2")
         self.tree.bind("<Double-1>", self._on_double_click)
 
+        if USE_DND:
+            self.tree.drop_target_register(DND_FILES)
+            self.tree.dnd_bind("<<Drop>>", self._on_drop)
+
         row4 = tk.Frame(main, bg="#f0f4f8")
         row4.pack(fill=tk.X)
 
@@ -273,6 +283,16 @@ class App:
             count = len(paths)
             label = Path(paths[0]).name if count == 1 else f"{count} files selected"
             self.file_var.set(label)
+
+    def _on_drop(self, event):
+        paths = [p for p in self.tk.splitlist(event.data) if p.lower().endswith(".pdf")]
+        if not paths:
+            return
+        self.pdf_paths = paths
+        count = len(paths)
+        label = Path(paths[0]).name if count == 1 else f"{count} files selected"
+        self.file_var.set(label)
+        self.status_var.set(f"{count} PDF(s) loaded. Click Start Scanning.")
 
     def _cancel(self):
         self.cancel_flag.set()
@@ -586,6 +606,6 @@ class App:
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
+    root = TkinterDnD.Tk() if USE_DND else tk.Tk()
     app = App(root)
     root.mainloop()

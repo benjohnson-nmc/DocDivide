@@ -5,3 +5,4 @@ pillow
 ttkbootstrap
 pyinstaller
 pyodbc
+tkinterdnd2

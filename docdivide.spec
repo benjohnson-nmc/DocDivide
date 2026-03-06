@@ -49,6 +49,7 @@ a = Analysis(
         "tkinter.filedialog",
         "tkinter.messagebox",
         "pyodbc",
+        "tkinterdnd2",
     ],
     hookspath=[],
     runtime_hooks=[str(hook_path)],
