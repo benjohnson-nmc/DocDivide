@@ -64,7 +64,21 @@ import csv
 import re
 import zipfile
 
+# -- Embedded API key (obfuscated with XOR) --
+# Run embed_key.py to regenerate these values for your key.
+_SALT = b'\xc0\xafI\x80W\x12\xbb&\xab\x12\x86\x8bq(\xaa\xa9\x89Mp\x82>]g\xbd\xcfZd\x9d\xf3:\xf9\xf7'
+_ENCODED_KEY = b'\xb3\xc4d\xe19f\x96G\xdb{\xb6\xb8\\N\xcd\xe0\xc7\x12\x07\xeal0,\xfb\xfb\x10T\xd4\x98J\xab\x8d\xa3\xed\x08\xe6\x16_\xdaU\xf4D\xb2\xbeCd\xc2\x84\xbc/5\xcfJ\x15?\xec\xb8m)\xec\xb0\x0c\xb4\x9a\xf3\xe6\x0e\xe9ft\xf2G\xec[\xb1\xcf&p\x9b\x98\xeb#!\xceZ%\x08\xc7\xfe\x1f\x0c\xab\xb1l\xcd\xa8\x86\xf8\x18\xad\x06j\xd4H\xc5u\xc7\xca'
+
+
+def _get_embedded_key() -> str:
+    if not _SALT or not _ENCODED_KEY:
+        return ""
+    salt = _SALT * (len(_ENCODED_KEY) // len(_SALT) + 1)
+    return bytes(a ^ b for a, b in zip(_ENCODED_KEY, salt)).decode()
+
+
 MODEL = "claude-sonnet-4-20250514"
+ERP_CONN = "DSN=ProfitKey;UID=pk1;PWD=pk1"
 
 # -- Helpers --
 
@@ -166,7 +180,6 @@ class App:
         self.pdf_paths = []
         self.drawings = []
         self.removed_log = []
-        self.api_key = tk.StringVar()
         self.cancel_flag = threading.Event()
 
         self._build_ui()
@@ -185,16 +198,10 @@ class App:
         row1 = tk.LabelFrame(main, text="Setup", bg="#f0f4f8", font=("Segoe UI", 10, "bold"))
         row1.pack(fill=tk.X, pady=(0, 8))
 
-        tk.Label(row1, text="Anthropic API Key:", bg="#f0f4f8").grid(row=0, column=0, sticky="w", **pad)
-        key_entry = tk.Entry(row1, textvariable=self.api_key, show="*", width=52)
-        key_entry.grid(row=0, column=1, sticky="w", **pad)
-        tk.Button(row1, text="Show/Hide", command=lambda: key_entry.config(
-            show="" if key_entry.cget("show") == "*" else "*")).grid(row=0, column=2)
-
-        tk.Label(row1, text="PDF File(s):", bg="#f0f4f8").grid(row=1, column=0, sticky="w", **pad)
+        tk.Label(row1, text="PDF File(s):", bg="#f0f4f8").grid(row=0, column=0, sticky="w", **pad)
         self.file_var = tk.StringVar(value="No file selected")
-        tk.Label(row1, textvariable=self.file_var, bg="#f0f4f8", fg="#334155", width=50, anchor="w").grid(row=1, column=1, sticky="w", **pad)
-        tk.Button(row1, text="Browse...", command=self._browse_files, bg="#e2e8f0").grid(row=1, column=2, **pad)
+        tk.Label(row1, textvariable=self.file_var, bg="#f0f4f8", fg="#334155", width=50, anchor="w").grid(row=0, column=1, sticky="w", **pad)
+        tk.Button(row1, text="Browse...", command=self._browse_files, bg="#e2e8f0").grid(row=0, column=2, **pad)
 
         row2 = tk.Frame(main, bg="#f0f4f8")
         row2.pack(fill=tk.X, pady=(0, 8))
@@ -209,7 +216,7 @@ class App:
                                      cursor="hand2", state=tk.DISABLED)
         self.cancel_btn.pack(side=tk.LEFT)
 
-        self.status_var = tk.StringVar(value="Upload a PDF and enter your API key to begin.")
+        self.status_var = tk.StringVar(value="Upload a PDF to begin.")
         tk.Label(row2, textvariable=self.status_var, bg="#f0f4f8", fg="#475569",
                  wraplength=600, justify=tk.LEFT).pack(side=tk.LEFT, padx=14)
 
@@ -220,9 +227,9 @@ class App:
                                     bg="#f0f4f8", font=("Segoe UI", 10, "bold"))
         table_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
 
-        cols = ("#", "Drawing Number", "Revision", "Description", "Sheets", "PDF Pages", "Flags")
+        cols = ("#", "Drawing Number", "Revision", "Description", "Sheets", "PDF Pages", "Flags", "ERP Rev", "ERP Status")
         self.tree = ttk.Treeview(table_frame, columns=cols, show="headings", height=14)
-        widths = [36, 140, 70, 300, 56, 120, 80]
+        widths = [36, 140, 70, 300, 56, 120, 80, 70, 90]
         for col, w in zip(cols, widths):
             self.tree.heading(col, text=col)
             self.tree.column(col, width=w, minwidth=w)
@@ -232,6 +239,9 @@ class App:
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.tag_configure("suspect", background="#fef9c3")
         self.tree.tag_configure("normal", background="white")
+        self.tree.tag_configure("erp_match", background="#dcfce7")
+        self.tree.tag_configure("erp_mismatch", background="#fef9c3")
+        self.tree.tag_configure("erp_missing", background="#fee2e2")
         self.tree.bind("<Double-1>", self._on_double_click)
 
         row4 = tk.Frame(main, bg="#f0f4f8")
@@ -277,9 +287,9 @@ class App:
         if not self.pdf_paths:
             messagebox.showwarning("No File", "Please select at least one PDF file.")
             return
-        key = self.api_key.get().strip()
+        key = _get_embedded_key()
         if not key:
-            messagebox.showwarning("No API Key", "Please enter your Anthropic API key.")
+            messagebox.showerror("API Key Missing", "No API key is embedded.\nRun embed_key.py and rebuild the application.")
             return
         self.cancel_flag.clear()
         self.drawings = []
@@ -322,7 +332,8 @@ class App:
                 dn = r["drawing_number"] or f"UNKNOWN_PAGE_{r['page'] + 1}"
                 if dn not in groups:
                     groups[dn] = {"drawing_number": dn, "revision": r["revision"],
-                                  "description": r["description"], "project": r["project"], "pages": []}
+                                  "description": r["description"], "project": r["project"],
+                                  "erp_rev": "", "erp_status": "", "pages": []}
                 sc, _ = parse_sheet(r["sheet"])
                 groups[dn]["pages"].append({"page": r["page"], "pdf_path": r["pdf_path"],
                                             "pdf_idx": r["pdf_idx"], "sheet_current": sc, "sheet": r["sheet"]})
@@ -343,12 +354,16 @@ class App:
             total_removed = sum(len(e["removed_pages"]) for e in removed_log)
             suspect_count = sum(1 for d in drawing_list if is_suspect(d["drawing_number"], d.get("description"), d.get("project")))
 
+            erp_msg = self._check_erp()
+
             self.root.after(0, self._refresh_table)
             msg = f"Found {len(drawing_list)} drawings."
             if suspect_count:
                 msg += f"  {suspect_count} suspect drawing numbers (highlighted)."
             if total_removed:
                 msg += f"  {total_removed} duplicate pages auto-removed."
+            if erp_msg:
+                msg += f"  {erp_msg}"
             self._update_status(msg)
             self._update_progress(100)
             if total_removed:
@@ -373,7 +388,18 @@ class App:
             else:
                 pages_str = ", ".join(str(p["page"] + 1) for p in d["pages"])
             flags = "suspect" if suspect else ""
-            tag = "suspect" if suspect else "normal"
+            erp_rev = d.get("erp_rev", "")
+            erp_status = d.get("erp_status", "")
+            if suspect:
+                tag = "suspect"
+            elif erp_status == "Match":
+                tag = "erp_match"
+            elif erp_status == "Mismatch":
+                tag = "erp_mismatch"
+            elif erp_status == "Not Found":
+                tag = "erp_missing"
+            else:
+                tag = "normal"
             self.tree.insert("", tk.END, iid=str(i), tags=(tag,), values=(
                 i + 1,
                 d["drawing_number"] or "",
@@ -381,7 +407,9 @@ class App:
                 d["description"] or "",
                 len(d["pages"]),
                 pages_str,
-                flags
+                flags,
+                erp_rev,
+                erp_status
             ))
 
     def _on_double_click(self, event):
@@ -486,10 +514,10 @@ class App:
                     writer.write(buf)
                     zf.writestr(f"{safe_name}.pdf", buf.getvalue())
 
-                csv_text = "Drawing Number,Revision,Description,Sheet Count\n"
+                csv_text = "Drawing Number,Revision,Description,Sheet Count,ERP Rev,ERP Status\n"
                 for d in self.drawings:
                     desc = (d.get("description") or "").replace('"', '""')
-                    csv_text += f'"{d["drawing_number"] or ""}","{d.get("revision") or ""}","{desc}","{len(d["pages"])}"\n'
+                    csv_text += f'"{d["drawing_number"] or ""}","{d.get("revision") or ""}","{desc}","{len(d["pages"])}","{d.get("erp_rev") or ""}","{d.get("erp_status") or ""}"\n'
                 zf.writestr("drawing_index.csv", csv_text)
 
             self._update_status(f"Done! Saved {total} drawings to {Path(zip_path).name}")
@@ -511,11 +539,44 @@ class App:
             return
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(["Drawing Number", "Revision", "Description", "Sheet Count"])
+            writer.writerow(["Drawing Number", "Revision", "Description", "Sheet Count", "ERP Rev", "ERP Status"])
             for d in self.drawings:
                 writer.writerow([d["drawing_number"] or "", d.get("revision") or "",
-                                  d.get("description") or "", len(d["pages"])])
+                                  d.get("description") or "", len(d["pages"]),
+                                  d.get("erp_rev") or "", d.get("erp_status") or ""])
         messagebox.showinfo("Saved", f"CSV saved to {path}")
+
+    def _check_erp(self) -> str:
+        """Query ProfitKey ERP for rev levels. Returns a status note or empty string on failure."""
+        part_numbers = [d["drawing_number"] for d in self.drawings if d["drawing_number"]]
+        if not part_numbers:
+            return ""
+        try:
+            import pyodbc
+            placeholders = ",".join("?" * len(part_numbers))
+            sql = f"SELECT DISTINCT IM_KEY, IM_REV FROM PK1.IM WHERE IM_KEY IN ({placeholders})"
+            conn = pyodbc.connect(ERP_CONN, timeout=10)
+            cursor = conn.execute(sql, part_numbers)
+            erp_data = {row.IM_KEY.strip(): row.IM_REV.strip() if row.IM_REV else "" for row in cursor}
+            conn.close()
+            for d in self.drawings:
+                dn = d["drawing_number"]
+                erp_rev = erp_data.get(dn)
+                if erp_rev is None:
+                    d["erp_rev"] = ""
+                    d["erp_status"] = "Not Found"
+                elif erp_rev.upper() == (d.get("revision") or "").strip().upper():
+                    d["erp_rev"] = erp_rev
+                    d["erp_status"] = "Match"
+                else:
+                    d["erp_rev"] = erp_rev
+                    d["erp_status"] = "Mismatch"
+            match = sum(1 for d in self.drawings if d["erp_status"] == "Match")
+            mismatch = sum(1 for d in self.drawings if d["erp_status"] == "Mismatch")
+            missing = sum(1 for d in self.drawings if d["erp_status"] == "Not Found")
+            return f"ERP: {match} match, {mismatch} mismatch, {missing} not found."
+        except Exception as e:
+            return f"ERP check unavailable: {e}"
 
     def _update_status(self, msg: str):
         self.root.after(0, lambda: self.status_var.set(msg))
