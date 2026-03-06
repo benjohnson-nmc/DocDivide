@@ -2,7 +2,7 @@
 # PyInstaller spec file for DocDivide
 #
 # BEFORE BUILDING:
-#   1. pip install pyinstaller anthropic pypdf2 pdf2image pillow ttkbootstrap
+#   1. pip install pyinstaller anthropic pypdf2 pdf2image pillow ttkbootstrap tkinterdnd2
 #   2. Download Poppler for Windows:
 #      https://github.com/oschwartz10612/poppler-windows/releases
 #      Extract to a folder, e.g. C:\poppler
@@ -31,11 +31,14 @@ hook_path.write_text(hook_code)
 poppler_bins = [(str(f), "poppler") for f in Path(POPPLER_BIN).glob("*.dll")]
 poppler_bins += [(str(f), "poppler") for f in Path(POPPLER_BIN).glob("*.exe")]
 
+import tkinterdnd2 as _dnd
+TKDND_DIR = str(Path(_dnd.__file__).parent)
+
 a = Analysis(
     ["docdivide.py"],
     pathex=[],
     binaries=poppler_bins,
-    datas=[],
+    datas=[(TKDND_DIR, "tkinterdnd2")],
     hiddenimports=[
         "anthropic",
         "pypdf",
@@ -48,6 +51,7 @@ a = Analysis(
         "tkinter.ttk",
         "tkinter.filedialog",
         "tkinter.messagebox",
+        "tkinterdnd2",
     ],
     hookspath=[],
     runtime_hooks=[str(hook_path)],

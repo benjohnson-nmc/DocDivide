@@ -3,4 +3,5 @@ pypdf2
 pdf2image
 pillow
 ttkbootstrap
+tkinterdnd2
 pyinstaller

@@ -60,6 +60,12 @@ try:
 except ImportError:
     USE_BOOTSTRAP = False
 
+try:
+    from tkinterdnd2 import TkinterDnD, DND_FILES
+    USE_DND = True
+except ImportError:
+    USE_DND = False
+
 import csv
 import re
 import zipfile
@@ -67,6 +73,16 @@ import zipfile
 MODEL = "claude-sonnet-4-20250514"
 
 # -- Helpers --
+
+def _parse_drop_paths(data, tk_instance):
+    """Parse tkdnd Tcl list format into a list of .pdf file paths."""
+    try:
+        paths = tk_instance.tk.splitlist(data)
+    except Exception:
+        paths = data.split()
+    return [p for p in paths if p.lower().endswith(".pdf")]
+
+
 
 def page_to_base64(pdf_path: str, page_idx: int) -> str:
     images = convert_from_path(pdf_path, first_page=page_idx + 1, last_page=page_idx + 1, dpi=150)
@@ -182,8 +198,15 @@ class App:
         main = tk.Frame(self.root, bg="#f0f4f8")
         main.pack(fill=tk.BOTH, expand=True, padx=14, pady=10)
 
+        if USE_DND:
+            main.drop_target_register(DND_FILES)
+            main.dnd_bind("<<Drop>>", self._on_drop)
+            main.dnd_bind("<<DragEnter>>", self._on_drag_enter)
+            main.dnd_bind("<<DragLeave>>", self._on_drag_leave)
+
         row1 = tk.LabelFrame(main, text="Setup", bg="#f0f4f8", font=("Segoe UI", 10, "bold"))
         row1.pack(fill=tk.X, pady=(0, 8))
+        self.file_label_frame = row1
 
         tk.Label(row1, text="Anthropic API Key:", bg="#f0f4f8").grid(row=0, column=0, sticky="w", **pad)
         key_entry = tk.Entry(row1, textvariable=self.api_key, show="*", width=52)
@@ -263,6 +286,21 @@ class App:
             count = len(paths)
             label = Path(paths[0]).name if count == 1 else f"{count} files selected"
             self.file_var.set(label)
+
+    def _on_drop(self, event):
+        paths = _parse_drop_paths(event.data, self.root)
+        if paths:
+            self.pdf_paths = paths
+            count = len(paths)
+            label = Path(paths[0]).name if count == 1 else f"{count} files selected"
+            self.file_var.set(label)
+        self._on_drag_leave(event)
+
+    def _on_drag_enter(self, event):
+        self.file_label_frame.config(bg="#bfdbfe")
+
+    def _on_drag_leave(self, event):
+        self.file_label_frame.config(bg="#f0f4f8")
 
     def _cancel(self):
         self.cancel_flag.set()
@@ -525,6 +563,6 @@ class App:
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
+    root = TkinterDnD.Tk() if USE_DND else tk.Tk()
     app = App(root)
     root.mainloop()
