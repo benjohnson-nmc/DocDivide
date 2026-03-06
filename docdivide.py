@@ -117,7 +117,7 @@ def render_page(pdf_path: str, page_idx: int, dpi: int = 150) -> "Image.Image":
 def crop_title_block(img: "Image.Image") -> str:
     """Crop bottom-right 65%×40% of image and return as base64 JPEG."""
     w, h = img.size
-    crop = img.crop((int(w * 0.35), int(h * 0.60), w, h))
+    crop = img.crop((int(w * 0.35), int(h * 0.75), w, h))
     buf = BytesIO()
     crop.save(buf, format="JPEG", quality=88)
     return base64.b64encode(buf.getvalue()).decode()
@@ -266,19 +266,15 @@ class App:
         # Logo (optional — loads from northern_logo.png if present)
         try:
             _img = Image.open(resource_path("northern_logo.png")).convert("RGBA")
-            # Replace near-white pixels with header bg color so logo blends in
             hx = BG_HEADER.lstrip("#")
             hc = (int(hx[0:2], 16), int(hx[2:4], 16), int(hx[4:6], 16), 255)
-            pixels = _img.load()
-            for y in range(_img.height):
-                for x in range(_img.width):
-                    r, g, b, a = pixels[x, y]
-                    if r > 220 and g > 220 and b > 220:
-                        pixels[x, y] = hc
             orig_w, orig_h = _img.size
             target_h = 52
             target_w = int(orig_w * target_h / orig_h)
-            _img = _img.resize((target_w, target_h), Image.LANCZOS).convert("RGB")
+            _img = _img.resize((target_w, target_h), Image.LANCZOS)
+            bg = Image.new("RGBA", _img.size, hc)
+            bg.paste(_img, mask=_img.split()[3])
+            _img = bg.convert("RGB")
             self._logo_photo = ImageTk.PhotoImage(_img)
             tk.Label(top, image=self._logo_photo, bg=BG_HEADER, bd=0).pack(
                 side=tk.LEFT, padx=16, pady=6)
@@ -397,7 +393,10 @@ class App:
         self._split_sel_btn = tk.Button(row4, text="Split Selected", command=self._split_selected,
                   bg=BTN_GRAY, fg="white", relief=tk.FLAT,
                   padx=8, pady=6, cursor="hand2")
-        # both start hidden; appear only when a row is selected
+        self._view_btn = tk.Button(row4, text="View Pages", command=self._view_pages,
+                  bg=BTN_GRAY, fg="white", relief=tk.FLAT,
+                  padx=8, pady=6, cursor="hand2")
+        # all three start hidden; appear only when a row is selected
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
 
         self.removed_var = tk.StringVar(value="")
@@ -407,10 +406,76 @@ class App:
     def _on_tree_select(self, event=None):
         if self.tree.selection():
             self._merge_btn.pack(side=tk.LEFT, padx=(0, 6))
-            self._split_sel_btn.pack(side=tk.LEFT)
+            self._split_sel_btn.pack(side=tk.LEFT, padx=(0, 6))
+            self._view_btn.pack(side=tk.LEFT)
         else:
             self._merge_btn.pack_forget()
             self._split_sel_btn.pack_forget()
+            self._view_btn.pack_forget()
+
+    def _view_pages(self):
+        idx = self._get_selected_idx()
+        if idx is None:
+            return
+        d = self.drawings[idx]
+
+        win = tk.Toplevel(self.root)
+        win.title(f"Pages — {d['drawing_number']}")
+        win.configure(bg=BG_MAIN)
+        win.geometry("920x700")
+        win._photos = []
+
+        canvas = tk.Canvas(win, bg=BG_MAIN, highlightthickness=0)
+        vsb = ttk.Scrollbar(win, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        inner = tk.Frame(canvas, bg=BG_MAIN)
+        cwin = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(cwin, width=e.width))
+
+        def _mwheel(e):
+            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        canvas.bind_all("<MouseWheel>", _mwheel)
+        win.bind("<Destroy>", lambda e: canvas.unbind_all("<MouseWheel>"))
+
+        status_lbl = tk.Label(inner, text="Rendering pages...", bg=BG_MAIN, fg=FG_DIM,
+                              font=("Segoe UI", 10))
+        status_lbl.pack(pady=20)
+
+        def render_thread():
+            pages = d["pages"]
+            first = True
+            for p in pages:
+                try:
+                    img = render_page(p["pdf_path"], p["page"])
+                    rotation = p.get("rotation", 0)
+                    if rotation:
+                        img = img.rotate(-rotation, expand=True)
+                    scale = min(860 / img.width, 1.0)
+                    img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
+                    photo = ImageTk.PhotoImage(img)
+                    page_num = p["page"] + 1
+
+                    def add_image(photo=photo, page_num=page_num, first=first):
+                        win._photos.append(photo)
+                        if first:
+                            status_lbl.destroy()
+                        tk.Label(inner, image=photo, bg=BG_MAIN, bd=1, relief="solid").pack(
+                            pady=(10, 2), padx=10)
+                        tk.Label(inner, text=f"PDF page {page_num}", bg=BG_MAIN, fg=FG_DIM,
+                                 font=("Segoe UI", 8)).pack(pady=(0, 6))
+
+                    win.after(0, add_image)
+                    first = False
+                except Exception as e:
+                    err = str(e)
+                    win.after(0, lambda err=err: tk.Label(
+                        inner, text=f"Error: {err}", bg=BG_MAIN, fg="#f87171").pack(pady=4))
+
+        threading.Thread(target=render_thread, daemon=True).start()
 
     def _browse_files(self):
         paths = filedialog.askopenfilenames(filetypes=[("PDF files", "*.pdf")])
@@ -544,8 +609,8 @@ class App:
             self._update_status(f"Error: {e}")
         finally:
             self.root.after(0, lambda: self._set_ui_scanning(False))
-            self.root.after(0, lambda: self.split_btn.pack(side=tk.LEFT, padx=(0, 10), before=self._merge_btn))
-            self.root.after(0, lambda: self.csv_btn.pack(side=tk.LEFT, padx=(0, 10), before=self._merge_btn))
+            self.root.after(0, lambda: self.split_btn.pack(side=tk.LEFT, padx=(0, 10)))
+            self.root.after(0, lambda: self.csv_btn.pack(side=tk.LEFT, padx=(0, 10)))
 
     def _refresh_table(self):
         for row in self.tree.get_children():
@@ -700,7 +765,7 @@ class App:
             self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
             self._update_status(f"Error: {e}")
         finally:
-            self.root.after(0, lambda: self.split_btn.pack(side=tk.LEFT, padx=(0, 10), before=self._merge_btn))
+            self.root.after(0, lambda: self.split_btn.pack(side=tk.LEFT, padx=(0, 10)))
 
     def _export_csv(self):
         if not self.drawings:
