@@ -146,11 +146,11 @@ def is_suspect(dn, description, project):
 def deduplicate_pages(pages):
     by_sheet = {}
     for p in pages:
-        key = str(p["sheet_current"]) if p["sheet_current"] is not None else f"_pg{p['page']}"
+        key = str(p["sheet_current"]) if p["sheet_current"] is not None else f"_pg{p.get('pdf_idx', 0)}_{p['page']}"
         by_sheet[key] = p
-    kept_pages = set(p["page"] for p in by_sheet.values())
-    kept = [p for p in pages if p["page"] in kept_pages]
-    removed = [p for p in pages if p["page"] not in kept_pages]
+    kept_ids = {(p.get("pdf_path", ""), p["page"]) for p in by_sheet.values()}
+    kept = [p for p in pages if (p.get("pdf_path", ""), p["page"]) in kept_ids]
+    removed = [p for p in pages if (p.get("pdf_path", ""), p["page"]) not in kept_ids]
     return kept, removed
 
 
@@ -163,7 +163,7 @@ class App:
         self.root.geometry("1000x720")
         self.root.resizable(True, True)
 
-        self.pdf_path = None
+        self.pdf_paths = []
         self.drawings = []
         self.removed_log = []
         self.api_key = tk.StringVar()
@@ -191,10 +191,10 @@ class App:
         tk.Button(row1, text="Show/Hide", command=lambda: key_entry.config(
             show="" if key_entry.cget("show") == "*" else "*")).grid(row=0, column=2)
 
-        tk.Label(row1, text="PDF File:", bg="#f0f4f8").grid(row=1, column=0, sticky="w", **pad)
+        tk.Label(row1, text="PDF File(s):", bg="#f0f4f8").grid(row=1, column=0, sticky="w", **pad)
         self.file_var = tk.StringVar(value="No file selected")
         tk.Label(row1, textvariable=self.file_var, bg="#f0f4f8", fg="#334155", width=50, anchor="w").grid(row=1, column=1, sticky="w", **pad)
-        tk.Button(row1, text="Browse...", command=self._browse_file, bg="#e2e8f0").grid(row=1, column=2, **pad)
+        tk.Button(row1, text="Browse...", command=self._browse_files, bg="#e2e8f0").grid(row=1, column=2, **pad)
 
         row2 = tk.Frame(main, bg="#f0f4f8")
         row2.pack(fill=tk.X, pady=(0, 8))
@@ -256,11 +256,13 @@ class App:
         tk.Label(row4, textvariable=self.removed_var, bg="#f0f4f8",
                  fg="#7e22ce", font=("Segoe UI", 9)).pack(side=tk.RIGHT, padx=10)
 
-    def _browse_file(self):
-        path = filedialog.askopenfilename(filetypes=[("PDF files", "*.pdf")])
-        if path:
-            self.pdf_path = path
-            self.file_var.set(Path(path).name)
+    def _browse_files(self):
+        paths = filedialog.askopenfilenames(filetypes=[("PDF files", "*.pdf")])
+        if paths:
+            self.pdf_paths = list(paths)
+            count = len(paths)
+            label = Path(paths[0]).name if count == 1 else f"{count} files selected"
+            self.file_var.set(label)
 
     def _cancel(self):
         self.cancel_flag.set()
@@ -272,8 +274,8 @@ class App:
         self.cancel_btn.config(state=tk.NORMAL if scanning else tk.DISABLED)
 
     def _start_scan(self):
-        if not self.pdf_path:
-            messagebox.showwarning("No File", "Please select a PDF file first.")
+        if not self.pdf_paths:
+            messagebox.showwarning("No File", "Please select at least one PDF file.")
             return
         key = self.api_key.get().strip()
         if not key:
@@ -291,23 +293,29 @@ class App:
     def _scan_thread(self, api_key: str):
         client = anthropic.Anthropic(api_key=api_key)
         try:
-            reader = PdfReader(self.pdf_path)
-            total = len(reader.pages)
-            self._update_status(f"Scanning {total} pages...")
+            readers = [PdfReader(p) for p in self.pdf_paths]
+            total = sum(len(r.pages) for r in readers)
+            self._update_status(f"Scanning {total} pages across {len(self.pdf_paths)} file(s)...")
 
             results = []
-            for i in range(total):
+            done = 0
+            for j, (pdf_path, reader) in enumerate(zip(self.pdf_paths, readers)):
+                for i in range(len(reader.pages)):
+                    if self.cancel_flag.is_set():
+                        break
+                    self._update_status(f"Scanning page {done + 1} of {total}...")
+                    self._update_progress(int(done / total * 100))
+                    try:
+                        b64 = page_to_base64(pdf_path, i)
+                        data = extract_title_block(client, b64, i)
+                        results.append({"page": i, "pdf_path": pdf_path, "pdf_idx": j, **data})
+                    except Exception as e:
+                        results.append({"page": i, "pdf_path": pdf_path, "pdf_idx": j,
+                                        "drawing_number": None, "revision": None,
+                                        "description": None, "sheet": None, "project": None})
+                    done += 1
                 if self.cancel_flag.is_set():
                     break
-                self._update_status(f"Scanning page {i + 1} of {total}...")
-                self._update_progress(int(i / total * 100))
-                try:
-                    b64 = page_to_base64(self.pdf_path, i)
-                    data = extract_title_block(client, b64, i)
-                    results.append({"page": i, **data})
-                except Exception as e:
-                    results.append({"page": i, "drawing_number": None, "revision": None,
-                                    "description": None, "sheet": None, "project": None})
 
             groups = {}
             for r in results:
@@ -316,7 +324,8 @@ class App:
                     groups[dn] = {"drawing_number": dn, "revision": r["revision"],
                                   "description": r["description"], "project": r["project"], "pages": []}
                 sc, _ = parse_sheet(r["sheet"])
-                groups[dn]["pages"].append({"page": r["page"], "sheet_current": sc, "sheet": r["sheet"]})
+                groups[dn]["pages"].append({"page": r["page"], "pdf_path": r["pdf_path"],
+                                            "pdf_idx": r["pdf_idx"], "sheet_current": sc, "sheet": r["sheet"]})
 
             for g in groups.values():
                 g["pages"].sort(key=lambda p: (p["sheet_current"] or 9999, p["page"]))
@@ -359,7 +368,10 @@ class App:
             self.tree.delete(row)
         for i, d in enumerate(self.drawings):
             suspect = is_suspect(d["drawing_number"], d.get("description"), d.get("project"))
-            pages_str = ", ".join(str(p["page"] + 1) for p in d["pages"])
+            if len(self.pdf_paths) > 1:
+                pages_str = ", ".join(f"F{p['pdf_idx']+1}:p{p['page']+1}" for p in d["pages"])
+            else:
+                pages_str = ", ".join(str(p["page"] + 1) for p in d["pages"])
             flags = "suspect" if suspect else ""
             tag = "suspect" if suspect else "normal"
             self.tree.insert("", tk.END, iid=str(i), tags=(tag,), values=(
@@ -454,7 +466,13 @@ class App:
         self._update_status("Building PDFs...")
         self.root.after(0, lambda: self.split_btn.config(state=tk.DISABLED))
         try:
-            reader = PdfReader(self.pdf_path)
+            readers = {}
+
+            def get_reader(path):
+                if path not in readers:
+                    readers[path] = PdfReader(path)
+                return readers[path]
+
             total = len(self.drawings)
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
                 for i, d in enumerate(self.drawings):
@@ -462,7 +480,7 @@ class App:
                     self._update_progress(int(i / total * 100))
                     writer = PdfWriter()
                     for p in d["pages"]:
-                        writer.add_page(reader.pages[p["page"]])
+                        writer.add_page(get_reader(p["pdf_path"]).pages[p["page"]])
                     safe_name = re.sub(r"[^\w\-\.]", "_", str(d["drawing_number"]))
                     buf = BytesIO()
                     writer.write(buf)
