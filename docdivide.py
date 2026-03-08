@@ -94,6 +94,11 @@ ERP_SERVICE = "LIVE1"
 ERP_USER = "PK1"
 ERP_PWD = "PK1"
 
+# ── SolidWorks PDM ───────────────────────────────────────────────
+PDM_DSN          = "PDM"              # Windows ODBC DSN name (set up in ODBC Data Source Admin)
+PDM_VAR_DRAWNUM  = "Drawing Number"   # PDM custom property name for drawing number
+PDM_VAR_REVISION = "Revision"         # PDM custom property name for revision
+
 # ── Night-mode palette ──────────────────────────────────────────
 BG_MAIN    = "#0d1117"
 BG_SURFACE = "#161b22"
@@ -350,9 +355,9 @@ class App:
                                     bg=BG_SURFACE, fg=FG_PRIMARY, font=("Segoe UI", 10, "bold"))
         table_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
 
-        cols = ("Customer", "Drawing Number", "ERP Status", "Revision", "ERP Rev", "Description", "Sheets", "PDF Pages", "Flags")
+        cols = ("Customer", "Drawing Number", "ERP Status", "Revision", "ERP Rev", "PDM Status", "PDM Rev", "Description", "Sheets", "PDF Pages", "Flags")
         self.tree = ttk.Treeview(table_frame, columns=cols, show="headings", height=14)
-        widths = [160, 140, 90, 70, 70, 300, 56, 120, 80]
+        widths = [160, 140, 90, 70, 70, 90, 70, 260, 56, 120, 80]
         for col, w in zip(cols, widths):
             self.tree.heading(col, text=col)
             self.tree.column(col, width=w, minwidth=w)
@@ -566,7 +571,8 @@ class App:
                 if dn not in groups:
                     groups[dn] = {"drawing_number": dn, "revision": r["revision"],
                                   "description": r["description"], "project": r["project"],
-                                  "erp_rev": "", "erp_status": "", "erp_customer": "", "pages": []}
+                                  "erp_rev": "", "erp_status": "", "erp_customer": "",
+                                  "pdm_rev": "", "pdm_status": "", "pages": []}
                 sc, _ = parse_sheet(r["sheet"])
                 groups[dn]["pages"].append({"page": r["page"], "pdf_path": r["pdf_path"],
                                             "pdf_idx": r["pdf_idx"], "sheet_current": sc,
@@ -589,6 +595,7 @@ class App:
             suspect_count = sum(1 for d in drawing_list if is_suspect(d["drawing_number"], d.get("description"), d.get("project")))
 
             erp_msg = self._check_erp()
+            pdm_msg = self._check_pdm()
 
             self.root.after(0, self._refresh_table)
             msg = f"Found {len(drawing_list)} drawings."
@@ -598,6 +605,8 @@ class App:
                 msg += f"  {total_removed} duplicate pages auto-removed."
             if erp_msg:
                 msg += f"  {erp_msg}"
+            if pdm_msg:
+                msg += f"  {pdm_msg}"
             self._update_status(msg)
             self._update_progress(100)
             if total_removed:
@@ -626,6 +635,8 @@ class App:
             erp_rev = d.get("erp_rev", "")
             erp_status = d.get("erp_status", "")
             erp_customer = d.get("erp_customer", "") if erp_status == "Match" else ""
+            pdm_rev = d.get("pdm_rev", "")
+            pdm_status = d.get("pdm_status", "")
             if suspect:
                 tag = "suspect"
             elif erp_status == "Match":
@@ -642,6 +653,8 @@ class App:
                 erp_status,
                 d["revision"] or "",
                 erp_rev,
+                pdm_status,
+                pdm_rev,
                 d["description"] or "",
                 len(d["pages"]),
                 pages_str,
@@ -654,12 +667,12 @@ class App:
             return
         col = self.tree.identify_column(event.x)
         col_idx = int(col.replace("#", "")) - 1
-        if col_idx not in (1, 3, 5):
+        if col_idx not in (1, 3, 7):
             return
         iid = self.tree.identify_row(event.y)
         if not iid:
             return
-        field_map = {1: "drawing_number", 3: "revision", 5: "description"}
+        field_map = {1: "drawing_number", 3: "revision", 7: "description"}
         field = field_map[col_idx]
         current_val = self.drawings[int(iid)][field] or ""
         x, y, w, h = self.tree.bbox(iid, col)
@@ -752,10 +765,14 @@ class App:
                     writer.write(buf)
                     zf.writestr(f"{safe_name}.pdf", buf.getvalue())
 
-                csv_text = "Drawing Number,Revision,Description,Sheet Count,ERP Rev,ERP Status\n"
+                csv_text = "Drawing Number,Revision,Description,Sheet Count,ERP Rev,ERP Status,PDM Rev,PDM Status\n"
                 for d in self.drawings:
                     desc = (d.get("description") or "").replace('"', '""')
-                    csv_text += f'"{d["drawing_number"] or ""}","{d.get("revision") or ""}","{desc}","{len(d["pages"])}","{d.get("erp_rev") or ""}","{d.get("erp_status") or ""}"\n'
+                    csv_text += (
+                        f'"{d["drawing_number"] or ""}","{d.get("revision") or ""}","{desc}",'
+                        f'"{len(d["pages"])}","{d.get("erp_rev") or ""}","{d.get("erp_status") or ""}",'
+                        f'"{d.get("pdm_rev") or ""}","{d.get("pdm_status") or ""}"\n'
+                    )
                 zf.writestr("drawing_index.csv", csv_text)
 
             self._update_status(f"Done! Saved {total} drawings to {Path(zip_path).name}")
@@ -777,11 +794,12 @@ class App:
             return
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(["Drawing Number", "Revision", "Description", "Sheet Count", "ERP Rev", "ERP Status"])
+            writer.writerow(["Drawing Number", "Revision", "Description", "Sheet Count", "ERP Rev", "ERP Status", "PDM Rev", "PDM Status"])
             for d in self.drawings:
                 writer.writerow([d["drawing_number"] or "", d.get("revision") or "",
                                   d.get("description") or "", len(d["pages"]),
-                                  d.get("erp_rev") or "", d.get("erp_status") or ""])
+                                  d.get("erp_rev") or "", d.get("erp_status") or "",
+                                  d.get("pdm_rev") or "", d.get("pdm_status") or ""])
         messagebox.showinfo("Saved", f"CSV saved to {path}")
 
     def _check_erp(self) -> str:
@@ -826,6 +844,100 @@ class App:
             return f"ERP: {match} match, {mismatch} mismatch, {missing} not found."
         except Exception as e:
             return f"ERP check unavailable: {e}"
+
+    def _check_pdm(self) -> str:
+        """Query SolidWorks PDM Standard via ODBC DSN for revision data.
+
+        Connects to the PDM SQL Server vault using the Windows ODBC DSN named
+        in PDM_DSN.  On first contact it performs schema discovery (lists
+        tables and variable names) so the caller can see what is available
+        even before the variable-name constants are tuned.
+
+        Returns a human-readable status string like the ERP check does.
+        """
+        part_numbers = [d["drawing_number"] for d in self.drawings if d["drawing_number"]]
+        if not part_numbers:
+            return ""
+        try:
+            import pyodbc
+            conn = pyodbc.connect(f"DSN={PDM_DSN};Trusted_Connection=yes", timeout=10)
+            cursor = conn.cursor()
+
+            # ── Schema discovery ──────────────────────────────────────────
+            cursor.execute(
+                "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES "
+                "WHERE TABLE_TYPE='BASE TABLE' ORDER BY TABLE_NAME"
+            )
+            tables = {row[0] for row in cursor}
+
+            if "Variables" not in tables or "VariableValues" not in tables or "Documents" not in tables:
+                conn.close()
+                return (
+                    f"PDM: Connected to {PDM_DSN}. "
+                    f"Schema unrecognized — tables found: {', '.join(sorted(tables)[:15])}. "
+                    f"Expected: Documents, Variables, VariableValues."
+                )
+
+            cursor.execute("SELECT VariableName FROM Variables ORDER BY VariableName")
+            var_names = [row[0] for row in cursor]
+
+            if PDM_VAR_DRAWNUM not in var_names:
+                conn.close()
+                return (
+                    f"PDM: Connected. Variable '{PDM_VAR_DRAWNUM}' not found. "
+                    f"Available variables: {', '.join(var_names[:20])}."
+                )
+
+            # ── Lookup ────────────────────────────────────────────────────
+            placeholders = ",".join("?" * len(part_numbers))
+            sql = f"""
+                SELECT
+                    MAX(CASE WHEN v.VariableName = ? THEN vv.ValueCache END) AS DrawNum,
+                    MAX(CASE WHEN v.VariableName = ? THEN vv.ValueCache END) AS Revision
+                FROM Documents d
+                JOIN VariableValues vv ON d.DocumentID = vv.DocumentID
+                JOIN Variables v       ON vv.VariableID = v.VariableID
+                WHERE v.VariableName IN (?, ?)
+                GROUP BY d.DocumentID
+                HAVING MAX(CASE WHEN v.VariableName = ? THEN vv.ValueCache END) IN ({placeholders})
+            """
+            params = (
+                [PDM_VAR_DRAWNUM, PDM_VAR_REVISION,
+                 PDM_VAR_DRAWNUM, PDM_VAR_REVISION,
+                 PDM_VAR_DRAWNUM]
+                + part_numbers
+            )
+            cursor.execute(sql, params)
+
+            pdm_data = {}
+            for row in cursor:
+                draw_num = (row[0] or "").strip()
+                revision  = (row[1] or "").strip()
+                if draw_num:
+                    pdm_data[draw_num] = revision
+
+            conn.close()
+
+            for d in self.drawings:
+                dn = d["drawing_number"]
+                if dn not in pdm_data:
+                    d["pdm_rev"]    = ""
+                    d["pdm_status"] = "Not Found"
+                else:
+                    pdm_rev = pdm_data[dn]
+                    d["pdm_rev"] = pdm_rev
+                    if pdm_rev.upper() == (d.get("revision") or "").strip().upper():
+                        d["pdm_status"] = "Match"
+                    else:
+                        d["pdm_status"] = "Mismatch"
+
+            match    = sum(1 for d in self.drawings if d["pdm_status"] == "Match")
+            mismatch = sum(1 for d in self.drawings if d["pdm_status"] == "Mismatch")
+            missing  = sum(1 for d in self.drawings if d["pdm_status"] == "Not Found")
+            return f"PDM: {match} match, {mismatch} mismatch, {missing} not found."
+
+        except Exception as e:
+            return f"PDM check unavailable: {e}"
 
     def _update_status(self, msg: str):
         self.root.after(0, lambda: self.status_var.set(msg))
