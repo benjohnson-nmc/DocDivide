@@ -98,6 +98,8 @@ ERP_PWD = "PK1"
 PDM_DSN          = "PDM"              # Windows ODBC DSN name (set up in ODBC Data Source Admin)
 PDM_VAR_DRAWNUM  = "Drawing Number"   # PDM custom property name for drawing number
 PDM_VAR_REVISION = "Revision"         # PDM custom property name for revision
+PDM_VAR_CUSTOMER = "Customer"         # PDM custom property name for customer
+PDM_VAR_DESC     = "Description"      # PDM custom property name for description
 
 # ── Night-mode palette ──────────────────────────────────────────
 BG_MAIN    = "#0d1117"
@@ -244,6 +246,7 @@ class App:
         self.drawings = []
         self.removed_log = []
         self.cancel_flag = threading.Event()
+        self.project_customer = ""
 
         self._build_ui()
 
@@ -362,6 +365,7 @@ class App:
             self.tree.heading(col, text=col)
             self.tree.column(col, width=w, minwidth=w)
 
+        self.tree.configure(selectmode="extended")
         vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -401,7 +405,16 @@ class App:
         self._view_btn = tk.Button(row4, text="View Pages", command=self._view_pages,
                   bg=BTN_GRAY, fg="white", relief=tk.FLAT,
                   padx=8, pady=6, cursor="hand2")
-        # all three start hidden; appear only when a row is selected
+        self._open_sw_btn = tk.Button(row4, text="Open SolidWorks", command=self._open_solidworks,
+                  bg=BTN_GRAY, fg="white", relief=tk.FLAT,
+                  padx=8, pady=6, cursor="hand2")
+        self._push_pk_btn = tk.Button(row4, text="Push to PK", command=self._push_to_pk,
+                  bg=BTN_GRAY, fg="white", relief=tk.FLAT,
+                  padx=8, pady=6, cursor="hand2")
+        self._push_pdm_btn = tk.Button(row4, text="Push to PDM", command=self._push_to_pdm,
+                  bg=BTN_GRAY, fg="white", relief=tk.FLAT,
+                  padx=8, pady=6, cursor="hand2")
+        # all start hidden; appear only when a row is selected
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
 
         self.removed_var = tk.StringVar(value="")
@@ -412,20 +425,34 @@ class App:
         if self.tree.selection():
             self._merge_btn.pack(side=tk.LEFT, padx=(0, 6))
             self._split_sel_btn.pack(side=tk.LEFT, padx=(0, 6))
-            self._view_btn.pack(side=tk.LEFT)
+            self._view_btn.pack(side=tk.LEFT, padx=(0, 6))
+            self._open_sw_btn.pack(side=tk.LEFT, padx=(0, 6))
+            self._push_pk_btn.pack(side=tk.LEFT, padx=(0, 6))
+            self._push_pdm_btn.pack(side=tk.LEFT)
         else:
             self._merge_btn.pack_forget()
             self._split_sel_btn.pack_forget()
             self._view_btn.pack_forget()
+            self._open_sw_btn.pack_forget()
+            self._push_pk_btn.pack_forget()
+            self._push_pdm_btn.pack_forget()
 
     def _view_pages(self):
-        idx = self._get_selected_idx()
-        if idx is None:
+        indices = self._get_selected_indices()
+        if not indices:
             return
-        d = self.drawings[idx]
+        selected = [self.drawings[i] for i in indices]
+
+        if len(selected) == 1:
+            title = f"Pages — {selected[0]['drawing_number']}"
+        else:
+            title = f"Pages — {len(selected)} drawings"
+
+        # Build flat list of (drawing, page) tuples in selection order
+        page_entries = [(d, p) for d in selected for p in d["pages"]]
 
         win = tk.Toplevel(self.root)
-        win.title(f"Pages — {d['drawing_number']}")
+        win.title(title)
         win.configure(bg=BG_MAIN)
         win.geometry("920x700")
         win._photos = []
@@ -451,9 +478,8 @@ class App:
         status_lbl.pack(pady=20)
 
         def render_thread():
-            pages = d["pages"]
             first = True
-            for p in pages:
+            for d, p in page_entries:
                 try:
                     img = render_page(p["pdf_path"], p["page"])
                     rotation = p.get("rotation", 0)
@@ -462,15 +488,15 @@ class App:
                     scale = min(860 / img.width, 1.0)
                     img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
                     photo = ImageTk.PhotoImage(img)
-                    page_num = p["page"] + 1
+                    label_text = f"{d['drawing_number']}  —  PDF page {p['page'] + 1}"
 
-                    def add_image(photo=photo, page_num=page_num, first=first):
+                    def add_image(photo=photo, label_text=label_text, first=first):
                         win._photos.append(photo)
                         if first:
                             status_lbl.destroy()
                         tk.Label(inner, image=photo, bg=BG_MAIN, bd=1, relief="solid").pack(
                             pady=(10, 2), padx=10)
-                        tk.Label(inner, text=f"PDF page {page_num}", bg=BG_MAIN, fg=FG_DIM,
+                        tk.Label(inner, text=label_text, bg=BG_MAIN, fg=FG_DIM,
                                  font=("Segoe UI", 8)).pack(pady=(0, 6))
 
                     win.after(0, add_image)
@@ -523,6 +549,7 @@ class App:
         self.cancel_flag.clear()
         self.drawings = []
         self.removed_log = []
+        self.project_customer = ""
         self._refresh_table()
         self.split_btn.pack_forget()
         self.csv_btn.pack_forget()
@@ -597,7 +624,10 @@ class App:
             erp_msg = self._check_erp()
             pdm_msg = self._check_pdm()
 
-            self.root.after(0, self._refresh_table)
+            def _post_scan():
+                self._resolve_customer()
+                self._refresh_table()
+            self.root.after(0, _post_scan)
             msg = f"Found {len(drawing_list)} drawings."
             if suspect_count:
                 msg += f"  {suspect_count} suspect drawing numbers (highlighted)."
@@ -634,7 +664,7 @@ class App:
             flags = "suspect" if suspect else ""
             erp_rev = d.get("erp_rev", "")
             erp_status = d.get("erp_status", "")
-            erp_customer = d.get("erp_customer", "") if erp_status == "Match" else ""
+            erp_customer = self.project_customer or d.get("erp_customer", "")
             pdm_rev = d.get("pdm_rev", "")
             pdm_status = d.get("pdm_status", "")
             if suspect:
@@ -682,8 +712,11 @@ class App:
         popup.focus_set()
 
         def save(event=None):
-            self.drawings[int(iid)][field] = popup.get()
+            new_val = popup.get().strip().upper()
             popup.destroy()
+            self.drawings[int(iid)][field] = new_val
+            if field in ("drawing_number", "revision"):
+                self._recheck_erp_for_index(int(iid))
             self._refresh_table()
 
         popup.bind("<Return>", save)
@@ -695,6 +728,123 @@ class App:
             messagebox.showinfo("No Selection", "Please select a row in the table.")
             return None
         return int(sel[0])
+
+    def _get_selected_indices(self):
+        return sorted(int(iid) for iid in self.tree.selection())
+
+    def _resolve_customer(self):
+        """Determine project-level customer from ERP data; prompt user if ambiguous."""
+        customers = list({d["erp_customer"] for d in self.drawings if d.get("erp_customer")})
+        if len(customers) == 1:
+            self.project_customer = customers[0]
+            return
+        if len(customers) > 1:
+            # Multiple conflicting customers — ask user to choose
+            self._ask_customer_choice(customers)
+        else:
+            # No customer found — ask user to enter one
+            self._ask_customer_manual()
+
+    def _ask_customer_choice(self, options):
+        """Show a modal dialog with buttons for each customer option."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Select Customer")
+        dlg.configure(bg=BG_SURFACE)
+        dlg.resizable(False, False)
+        dlg.grab_set()
+        tk.Label(dlg, text="Multiple customers found. Select the correct one:",
+                 bg=BG_SURFACE, fg=FG_PRIMARY, font=("Segoe UI", 10),
+                 wraplength=380).pack(padx=20, pady=(16, 10))
+        chosen = tk.StringVar(value="")
+
+        def pick(val):
+            chosen.set(val)
+            dlg.destroy()
+
+        for opt in options:
+            tk.Button(dlg, text=opt, command=lambda v=opt: pick(v),
+                      bg=BTN_GRAY, fg="white", relief=tk.FLAT,
+                      padx=12, pady=6, cursor="hand2",
+                      font=("Segoe UI", 10)).pack(fill=tk.X, padx=20, pady=3)
+
+        frame = tk.Frame(dlg, bg=BG_SURFACE)
+        frame.pack(fill=tk.X, padx=20, pady=(6, 4))
+        tk.Label(frame, text="Or type manually:", bg=BG_SURFACE, fg=FG_DIM,
+                 font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        entry = tk.Entry(frame, font=("Segoe UI", 10), bg=BG_MAIN, fg=FG_PRIMARY,
+                         insertbackground=FG_PRIMARY)
+        entry.pack(side=tk.LEFT, padx=(6, 6), fill=tk.X, expand=True)
+        tk.Button(frame, text="OK", command=lambda: pick(entry.get().strip().upper()),
+                  bg=BTN_OK, fg="white", relief=tk.FLAT, padx=8, pady=4,
+                  cursor="hand2").pack(side=tk.LEFT)
+
+        self.root.wait_window(dlg)
+        if chosen.get():
+            self.project_customer = chosen.get()
+
+    def _ask_customer_manual(self):
+        """Show a modal dialog with a text entry to set the customer name."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Enter Customer")
+        dlg.configure(bg=BG_SURFACE)
+        dlg.resizable(False, False)
+        dlg.grab_set()
+        tk.Label(dlg, text="No customer found in ERP. Enter customer name:",
+                 bg=BG_SURFACE, fg=FG_PRIMARY, font=("Segoe UI", 10),
+                 wraplength=360).pack(padx=20, pady=(16, 8))
+        entry = tk.Entry(dlg, font=("Segoe UI", 11), width=30, bg=BG_MAIN,
+                         fg=FG_PRIMARY, insertbackground=FG_PRIMARY)
+        entry.pack(padx=20, pady=(0, 8))
+        entry.focus_set()
+
+        def confirm(event=None):
+            val = entry.get().strip().upper()
+            dlg.destroy()
+            if val:
+                self.project_customer = val
+
+        tk.Button(dlg, text="OK", command=confirm, bg=BTN_OK, fg="white",
+                  relief=tk.FLAT, padx=14, pady=6, cursor="hand2",
+                  font=("Segoe UI", 10)).pack(pady=(0, 16))
+        entry.bind("<Return>", confirm)
+        self.root.wait_window(dlg)
+
+    def _recheck_erp_for_index(self, idx: int):
+        """Re-query ERP for a single drawing (called after inline edit). Updates in place."""
+        d = self.drawings[idx]
+        dn = d.get("drawing_number")
+        if not dn:
+            d["erp_rev"] = ""
+            d["erp_status"] = "Not Found"
+            d["erp_customer"] = ""
+            return
+        try:
+            import oracledb
+            conn = oracledb.connect(user=ERP_USER, password=ERP_PWD,
+                                    dsn=f"{ERP_HOST}:{ERP_PORT}/{ERP_SERVICE}")
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT DISTINCT IM_KEY, IM_REV, IM_CATALOG FROM PK1.IM WHERE UPPER(TRIM(IM_KEY)) = :1",
+                [dn.strip().upper()]
+            )
+            row = cursor.fetchone()
+            conn.close()
+            if row is None:
+                d["erp_rev"] = ""
+                d["erp_status"] = "Not Found"
+                d["erp_customer"] = ""
+            else:
+                erp_rev = (row[1] or "").strip()
+                erp_catalog = (row[2] or "").strip()
+                d["erp_rev"] = erp_rev
+                d["erp_customer"] = erp_catalog
+                if erp_rev.upper() == (d.get("revision") or "").strip().upper():
+                    d["erp_status"] = "Match"
+                else:
+                    d["erp_status"] = "Mismatch"
+        except Exception:
+            pass  # leave existing ERP fields unchanged on connection failure
+        self._resolve_customer()
 
     def _merge_up(self):
         idx = self._get_selected_idx()
@@ -802,29 +952,189 @@ class App:
                                   d.get("pdm_rev") or "", d.get("pdm_status") or ""])
         messagebox.showinfo("Saved", f"CSV saved to {path}")
 
+    def _open_solidworks(self):
+        indices = self._get_selected_indices()
+        if not indices:
+            return
+        drawing_numbers = [self.drawings[i]["drawing_number"] for i in indices if self.drawings[i]["drawing_number"]]
+        if not drawing_numbers:
+            return
+        try:
+            import pyodbc
+            conn = pyodbc.connect(f"DSN={PDM_DSN};Trusted_Connection=yes", timeout=10)
+            cursor = conn.cursor()
+            not_found = []
+            for dn in drawing_numbers:
+                placeholders = "?"
+                sql = f"""
+                    SELECT d.Filename, d.Folder
+                    FROM Documents d
+                    JOIN VariableValues vv ON d.DocumentID = vv.DocumentID
+                    JOIN Variables v ON vv.VariableID = v.VariableID
+                    WHERE v.VariableName = ? AND vv.ValueCache = ?
+                    AND (d.Filename LIKE '%.sldasm' OR d.Filename LIKE '%.sldprt')
+                """
+                cursor.execute(sql, [PDM_VAR_DRAWNUM, dn])
+                rows = cursor.fetchall()
+                if not rows:
+                    not_found.append(dn)
+                    continue
+                # Prefer assembly over part
+                assemblies = [r for r in rows if r[0].lower().endswith(".sldasm")]
+                parts      = [r for r in rows if r[0].lower().endswith(".sldprt")]
+                chosen = assemblies[0] if assemblies else parts[0]
+                file_path = os.path.join(chosen[1], chosen[0]) if chosen[1] else chosen[0]
+                try:
+                    os.startfile(file_path)
+                except Exception as e:
+                    messagebox.showerror("Open Error", f"Could not open:\n{file_path}\n\n{e}")
+            conn.close()
+            if not_found:
+                messagebox.showwarning(
+                    "Not Found in PDM",
+                    "No SolidWorks file found for:\n" + "\n".join(not_found)
+                )
+        except Exception as e:
+            messagebox.showerror("PDM Error", f"Could not connect to PDM:\n{e}")
+
+    def _push_to_pk(self):
+        indices = self._get_selected_indices()
+        if not indices:
+            return
+        selected = [self.drawings[i] for i in indices]
+        rev = selected[0]["revision"] or "" if len(selected) == 1 else "(per drawing)"
+        customer = self.project_customer
+        if not messagebox.askyesno(
+            "Push to ProfitKey",
+            f"Update {len(selected)} part(s) in ProfitKey?\n\n"
+            f"Rev  →  {rev}\n"
+            f"Customer  →  {customer or '(unchanged if blank)'}"
+        ):
+            return
+
+        def push_thread():
+            try:
+                import oracledb
+                conn = oracledb.connect(user=ERP_USER, password=ERP_PWD,
+                                        dsn=f"{ERP_HOST}:{ERP_PORT}/{ERP_SERVICE}")
+                cursor = conn.cursor()
+                updated = 0
+                for d in selected:
+                    dn = d.get("drawing_number")
+                    if not dn:
+                        continue
+                    d_rev = (d.get("revision") or "").strip()
+                    if customer:
+                        cursor.execute(
+                            "UPDATE PK1.IM SET IM_REV = :1, IM_CATALOG = :2 WHERE IM_KEY = :3",
+                            [d_rev, customer, dn]
+                        )
+                    else:
+                        cursor.execute(
+                            "UPDATE PK1.IM SET IM_REV = :1 WHERE IM_KEY = :2",
+                            [d_rev, dn]
+                        )
+                    updated += cursor.rowcount
+                conn.commit()
+                conn.close()
+                self._check_erp()
+                self._resolve_customer()
+                self.root.after(0, self._refresh_table)
+                self.root.after(0, lambda: messagebox.showinfo(
+                    "Push to PK Complete", f"Updated {updated} record(s) in ProfitKey."))
+            except Exception as e:
+                self.root.after(0, lambda: messagebox.showerror("PK Error", str(e)))
+
+        threading.Thread(target=push_thread, daemon=True).start()
+
+    def _push_to_pdm(self):
+        indices = self._get_selected_indices()
+        if not indices:
+            return
+        selected = [self.drawings[i] for i in indices]
+        if not messagebox.askyesno(
+            "Push to PDM",
+            f"Push Revision, Customer, and Description to PDM for {len(selected)} drawing(s)?"
+        ):
+            return
+
+        def push_thread():
+            try:
+                import pyodbc
+                conn = pyodbc.connect(f"DSN={PDM_DSN};Trusted_Connection=yes", timeout=10)
+                cursor = conn.cursor()
+                customer = self.project_customer
+                updated = 0
+                for d in selected:
+                    dn = d.get("drawing_number")
+                    if not dn:
+                        continue
+                    # Find DocumentIDs for this drawing number
+                    cursor.execute(f"""
+                        SELECT DISTINCT vv.DocumentID
+                        FROM VariableValues vv
+                        JOIN Variables v ON vv.VariableID = v.VariableID
+                        WHERE v.VariableName = ? AND vv.ValueCache = ?
+                    """, [PDM_VAR_DRAWNUM, dn])
+                    doc_ids = [row[0] for row in cursor.fetchall()]
+                    if not doc_ids:
+                        continue
+                    # Build variable name → new value map
+                    updates = {
+                        PDM_VAR_REVISION: (d.get("revision") or "").strip(),
+                        PDM_VAR_DESC:     (d.get("description") or "").strip(),
+                    }
+                    if customer:
+                        updates[PDM_VAR_CUSTOMER] = customer
+                    for var_name, new_val in updates.items():
+                        cursor.execute(
+                            "SELECT VariableID FROM Variables WHERE VariableName = ?",
+                            [var_name]
+                        )
+                        row = cursor.fetchone()
+                        if not row:
+                            continue
+                        var_id = row[0]
+                        for doc_id in doc_ids:
+                            cursor.execute("""
+                                UPDATE VariableValues SET ValueCache = ?
+                                WHERE DocumentID = ? AND VariableID = ?
+                            """, [new_val, doc_id, var_id])
+                            updated += cursor.rowcount
+                conn.commit()
+                conn.close()
+                self._check_pdm()
+                self.root.after(0, self._refresh_table)
+                self.root.after(0, lambda: messagebox.showinfo(
+                    "Push to PDM Complete", f"Updated {updated} variable value(s) in PDM."))
+            except Exception as e:
+                self.root.after(0, lambda: messagebox.showerror("PDM Error", str(e)))
+
+        threading.Thread(target=push_thread, daemon=True).start()
+
     def _check_erp(self) -> str:
         """Query ProfitKey ERP for rev levels. Returns a status note or empty string on failure."""
-        part_numbers = [d["drawing_number"] for d in self.drawings if d["drawing_number"]]
+        part_numbers = [d["drawing_number"].strip() for d in self.drawings if d["drawing_number"]]
         if not part_numbers:
             return ""
         try:
             import oracledb
             placeholders = ",".join(f":{i+1}" for i in range(len(part_numbers)))
-            sql = f"SELECT DISTINCT IM_KEY, IM_REV, IM_CATALOG FROM PK1.IM WHERE IM_KEY IN ({placeholders})"
+            sql = f"SELECT DISTINCT IM_KEY, IM_REV, IM_CATALOG FROM PK1.IM WHERE UPPER(TRIM(IM_KEY)) IN ({placeholders})"
             conn = oracledb.connect(user=ERP_USER, password=ERP_PWD,
                                     dsn=f"{ERP_HOST}:{ERP_PORT}/{ERP_SERVICE}")
             cursor = conn.cursor()
-            cursor.execute(sql, part_numbers)
+            cursor.execute(sql, [p.upper() for p in part_numbers])
             erp_data = {
-                row[0].strip(): (
-                    row[1].strip() if row[1] else "",
-                    row[2].strip() if row[2] else "",
+                (row[0] or "").strip().upper(): (
+                    (row[1] or "").strip(),
+                    (row[2] or "").strip(),
                 )
                 for row in cursor
             }
             conn.close()
             for d in self.drawings:
-                dn = d["drawing_number"]
+                dn = (d["drawing_number"] or "").strip().upper()
                 rec = erp_data.get(dn)
                 if rec is None:
                     d["erp_rev"] = ""
