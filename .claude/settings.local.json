@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m PyInstaller docdivide.spec --clean)",
+      "Bash(python -m PyInstaller docdivide.spec --clean -y)",
+      "Bash(\"/c/Program Files \\(x86\\)/Inno Setup 6/ISCC.exe\" /c/DocDivide/installer.iss)",
+      "Read(//c/Program Files \\(x86\\)/**)",
+      "Read(//c/Program Files/**)",
+      "Bash(\"/c/Users/bjohnson/AppData/Local/Programs/Inno Setup 6/ISCC.exe\" /c/DocDivide/installer.iss)"
+    ]
+  }
+}

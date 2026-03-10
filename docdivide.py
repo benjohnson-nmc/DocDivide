@@ -120,7 +120,7 @@ TREE_SEL   = "#1e3a5f"
 
 # -- Helpers --
 
-def render_page(pdf_path: str, page_idx: int, dpi: int = 150) -> "Image.Image":
+def render_page(pdf_path: str, page_idx: int, dpi: int = 90) -> "Image.Image":
     images = convert_from_path(pdf_path, first_page=page_idx + 1, last_page=page_idx + 1, dpi=dpi)
     return images[0]
 
