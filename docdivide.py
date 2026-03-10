@@ -96,7 +96,11 @@ ERP_PWD = "PK1"
 
 # ── SolidWorks PDM ───────────────────────────────────────────────
 PDM_DSN          = "PDM"              # Windows ODBC DSN name (set up in ODBC Data Source Admin)
-PDM_VAR_DRAWNUM  = "Drawing Number"   # PDM custom property name for drawing number
+PDM_DB           = "NMC-ENG"          # PDM vault database name
+PDM_VAULT_PATH   = r"C:\NMC-ENG"      # local vault root path
+PDM_USER         = "benj"
+PDM_PWD          = "1234"
+PDM_VAR_DRAWNUM  = "Print"            # PDM custom property name for drawing number
 PDM_VAR_REVISION = "Revision"         # PDM custom property name for revision
 PDM_VAR_CUSTOMER = "Customer"         # PDM custom property name for customer
 PDM_VAR_DESC     = "Description"      # PDM custom property name for description
@@ -411,9 +415,6 @@ class App:
         self._push_pk_btn = tk.Button(row4, text="Push to PK", command=self._push_to_pk,
                   bg=BTN_GRAY, fg="white", relief=tk.FLAT,
                   padx=8, pady=6, cursor="hand2")
-        self._push_pdm_btn = tk.Button(row4, text="Push to PDM", command=self._push_to_pdm,
-                  bg=BTN_GRAY, fg="white", relief=tk.FLAT,
-                  padx=8, pady=6, cursor="hand2")
         # all start hidden; appear only when a row is selected
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
 
@@ -428,14 +429,12 @@ class App:
             self._view_btn.pack(side=tk.LEFT, padx=(0, 6))
             self._open_sw_btn.pack(side=tk.LEFT, padx=(0, 6))
             self._push_pk_btn.pack(side=tk.LEFT, padx=(0, 6))
-            self._push_pdm_btn.pack(side=tk.LEFT)
         else:
             self._merge_btn.pack_forget()
             self._split_sel_btn.pack_forget()
             self._view_btn.pack_forget()
             self._open_sw_btn.pack_forget()
             self._push_pk_btn.pack_forget()
-            self._push_pdm_btn.pack_forget()
 
     def _view_pages(self):
         indices = self._get_selected_indices()
@@ -952,6 +951,24 @@ class App:
                                   d.get("pdm_rev") or "", d.get("pdm_status") or ""])
         messagebox.showinfo("Saved", f"CSV saved to {path}")
 
+    def _pdm_get_file_path(self, cursor, dn: str):
+        """Return full local vault path for drawing number dn (SLDASM preferred, SLDPRT secondary)."""
+        cursor.execute("""
+            SELECT d.Filename, pr.Path
+            FROM Documents d
+            JOIN DocumentsInProjects dip ON d.DocumentID = dip.DocumentID
+            JOIN Projects pr ON dip.ProjectID = pr.ProjectID
+            WHERE UPPER(d.Filename) IN (?, ?)
+              AND (d.Deleted IS NULL OR d.Deleted = 0)
+        """, [dn.upper() + ".SLDASM", dn.upper() + ".SLDPRT"])
+        rows = cursor.fetchall()
+        if not rows:
+            return None
+        asm = [r for r in rows if r[0].upper().endswith(".SLDASM")]
+        chosen = asm[0] if asm else rows[0]
+        vault_rel = chosen[1].strip("\\") + "\\" + chosen[0]
+        return os.path.join(PDM_VAULT_PATH, vault_rel)
+
     def _open_solidworks(self):
         indices = self._get_selected_indices()
         if not indices:
@@ -961,29 +978,14 @@ class App:
             return
         try:
             import pyodbc
-            conn = pyodbc.connect(f"DSN={PDM_DSN};Trusted_Connection=yes", timeout=10)
+            conn = pyodbc.connect(f"DSN={PDM_DSN};DATABASE={PDM_DB};UID={PDM_USER};PWD={PDM_PWD}", timeout=10)
             cursor = conn.cursor()
             not_found = []
             for dn in drawing_numbers:
-                placeholders = "?"
-                sql = f"""
-                    SELECT d.Filename, d.Folder
-                    FROM Documents d
-                    JOIN VariableValues vv ON d.DocumentID = vv.DocumentID
-                    JOIN Variables v ON vv.VariableID = v.VariableID
-                    WHERE v.VariableName = ? AND vv.ValueCache = ?
-                    AND (d.Filename LIKE '%.sldasm' OR d.Filename LIKE '%.sldprt')
-                """
-                cursor.execute(sql, [PDM_VAR_DRAWNUM, dn])
-                rows = cursor.fetchall()
-                if not rows:
+                file_path = self._pdm_get_file_path(cursor, dn)
+                if not file_path:
                     not_found.append(dn)
                     continue
-                # Prefer assembly over part
-                assemblies = [r for r in rows if r[0].lower().endswith(".sldasm")]
-                parts      = [r for r in rows if r[0].lower().endswith(".sldprt")]
-                chosen = assemblies[0] if assemblies else parts[0]
-                file_path = os.path.join(chosen[1], chosen[0]) if chosen[1] else chosen[0]
                 try:
                     os.startfile(file_path)
                 except Exception as e:
@@ -1047,71 +1049,6 @@ class App:
 
         threading.Thread(target=push_thread, daemon=True).start()
 
-    def _push_to_pdm(self):
-        indices = self._get_selected_indices()
-        if not indices:
-            return
-        selected = [self.drawings[i] for i in indices]
-        if not messagebox.askyesno(
-            "Push to PDM",
-            f"Push Revision, Customer, and Description to PDM for {len(selected)} drawing(s)?"
-        ):
-            return
-
-        def push_thread():
-            try:
-                import pyodbc
-                conn = pyodbc.connect(f"DSN={PDM_DSN};Trusted_Connection=yes", timeout=10)
-                cursor = conn.cursor()
-                customer = self.project_customer
-                updated = 0
-                for d in selected:
-                    dn = d.get("drawing_number")
-                    if not dn:
-                        continue
-                    # Find DocumentIDs for this drawing number
-                    cursor.execute(f"""
-                        SELECT DISTINCT vv.DocumentID
-                        FROM VariableValues vv
-                        JOIN Variables v ON vv.VariableID = v.VariableID
-                        WHERE v.VariableName = ? AND vv.ValueCache = ?
-                    """, [PDM_VAR_DRAWNUM, dn])
-                    doc_ids = [row[0] for row in cursor.fetchall()]
-                    if not doc_ids:
-                        continue
-                    # Build variable name → new value map
-                    updates = {
-                        PDM_VAR_REVISION: (d.get("revision") or "").strip(),
-                        PDM_VAR_DESC:     (d.get("description") or "").strip(),
-                    }
-                    if customer:
-                        updates[PDM_VAR_CUSTOMER] = customer
-                    for var_name, new_val in updates.items():
-                        cursor.execute(
-                            "SELECT VariableID FROM Variables WHERE VariableName = ?",
-                            [var_name]
-                        )
-                        row = cursor.fetchone()
-                        if not row:
-                            continue
-                        var_id = row[0]
-                        for doc_id in doc_ids:
-                            cursor.execute("""
-                                UPDATE VariableValues SET ValueCache = ?
-                                WHERE DocumentID = ? AND VariableID = ?
-                            """, [new_val, doc_id, var_id])
-                            updated += cursor.rowcount
-                conn.commit()
-                conn.close()
-                self._check_pdm()
-                self.root.after(0, self._refresh_table)
-                self.root.after(0, lambda: messagebox.showinfo(
-                    "Push to PDM Complete", f"Updated {updated} variable value(s) in PDM."))
-            except Exception as e:
-                self.root.after(0, lambda: messagebox.showerror("PDM Error", str(e)))
-
-        threading.Thread(target=push_thread, daemon=True).start()
-
     def _check_erp(self) -> str:
         """Query ProfitKey ERP for rev levels. Returns a status note or empty string on failure."""
         part_numbers = [d["drawing_number"].strip() for d in self.drawings if d["drawing_number"]]
@@ -1170,66 +1107,42 @@ class App:
             return ""
         try:
             import pyodbc
-            conn = pyodbc.connect(f"DSN={PDM_DSN};Trusted_Connection=yes", timeout=10)
+            conn = pyodbc.connect(f"DSN={PDM_DSN};DATABASE={PDM_DB};UID={PDM_USER};PWD={PDM_PWD}", timeout=10)
             cursor = conn.cursor()
 
-            # ── Schema discovery ──────────────────────────────────────────
-            cursor.execute(
-                "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES "
-                "WHERE TABLE_TYPE='BASE TABLE' ORDER BY TABLE_NAME"
-            )
-            tables = {row[0] for row in cursor}
+            # ── Filename-based lookup (prefer SLDASM, fall back to SLDPRT) ──
+            # Build candidate filenames for all drawing numbers
+            filenames = []
+            for dn in part_numbers:
+                filenames.append(dn + ".SLDASM")
+                filenames.append(dn + ".SLDPRT")
 
-            if "Variables" not in tables or "VariableValues" not in tables or "Documents" not in tables:
-                conn.close()
-                return (
-                    f"PDM: Connected to {PDM_DSN}. "
-                    f"Schema unrecognized — tables found: {', '.join(sorted(tables)[:15])}. "
-                    f"Expected: Documents, Variables, VariableValues."
-                )
-
-            cursor.execute("SELECT VariableName FROM Variables ORDER BY VariableName")
-            var_names = [row[0] for row in cursor]
-
-            if PDM_VAR_DRAWNUM not in var_names:
-                conn.close()
-                return (
-                    f"PDM: Connected. Variable '{PDM_VAR_DRAWNUM}' not found. "
-                    f"Available variables: {', '.join(var_names[:20])}."
-                )
-
-            # ── Lookup ────────────────────────────────────────────────────
-            placeholders = ",".join("?" * len(part_numbers))
+            placeholders = ",".join("?" * len(filenames))
             sql = f"""
-                SELECT
-                    MAX(CASE WHEN v.VariableName = ? THEN vv.ValueCache END) AS DrawNum,
+                SELECT d.Filename,
                     MAX(CASE WHEN v.VariableName = ? THEN vv.ValueCache END) AS Revision
                 FROM Documents d
-                JOIN VariableValues vv ON d.DocumentID = vv.DocumentID
-                JOIN Variables v       ON vv.VariableID = v.VariableID
-                WHERE v.VariableName IN (?, ?)
-                GROUP BY d.DocumentID
-                HAVING MAX(CASE WHEN v.VariableName = ? THEN vv.ValueCache END) IN ({placeholders})
+                LEFT JOIN VariableValue vv ON d.DocumentID = vv.DocumentID
+                LEFT JOIN Variable v       ON vv.VariableID = v.VariableID
+                WHERE UPPER(d.Filename) IN ({placeholders})
+                  AND (d.Deleted IS NULL OR d.Deleted = 0)
+                GROUP BY d.Filename
             """
-            params = (
-                [PDM_VAR_DRAWNUM, PDM_VAR_REVISION,
-                 PDM_VAR_DRAWNUM, PDM_VAR_REVISION,
-                 PDM_VAR_DRAWNUM]
-                + part_numbers
-            )
-            cursor.execute(sql, params)
+            cursor.execute(sql, [PDM_VAR_REVISION] + [f.upper() for f in filenames])
 
+            # Build map: drawing_number -> revision (SLDASM preferred)
             pdm_data = {}
             for row in cursor:
-                draw_num = (row[0] or "").strip()
-                revision  = (row[1] or "").strip()
-                if draw_num:
-                    pdm_data[draw_num] = revision
+                fname = (row[0] or "").strip().upper()
+                revision = (row[1] or "").strip()
+                base, ext = fname.rsplit(".", 1) if "." in fname else (fname, "")
+                if base not in pdm_data or ext == "SLDASM":
+                    pdm_data[base] = revision
 
             conn.close()
 
             for d in self.drawings:
-                dn = d["drawing_number"]
+                dn = (d["drawing_number"] or "").strip().upper()
                 if dn not in pdm_data:
                     d["pdm_rev"]    = ""
                     d["pdm_status"] = "Not Found"
